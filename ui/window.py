@@ -13,7 +13,13 @@ from typing import Any
 from config import AppConfig
 from core.models import JobSpec, PipelineStage
 from core.pipeline import VideoLocalizationPipeline
-from language_config import TARGET_LOCALES, locale_from_label
+from language_config import (
+    DEFAULT_TARGET_LOCALE_LABEL,
+    SOURCE_LOCALES,
+    locale_from_label,
+    source_locale_from_label,
+    target_locales_for_source,
+)
 from ui.log_panel import LogPanel
 from ui.settings import SettingsPanel
 from utils.errors import VideoLocalizerError
@@ -22,7 +28,7 @@ from utils.errors import VideoLocalizerError
 class VideoLocalizerWindow(tk.Tk):
     def __init__(self, config: AppConfig):
         super().__init__()
-        self.title("AI 多语言视频本地化工具")
+        self.title("视频入乡随俗工具")
         self.geometry("980x820")
         self.minsize(820, 680)
         self.base_config = config
@@ -36,37 +42,40 @@ class VideoLocalizerWindow(tk.Tk):
         self.character_refs: list[Path] = []
         self.scene_refs: list[Path] = []
         self._build()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(100, self._poll_events)
 
     def _build(self) -> None:
         root = ttk.Frame(self, padding=12)
         root.pack(fill="both", expand=True)
         root.columnconfigure(1, weight=1)
-        root.rowconfigure(5, weight=1)
+        root.rowconfigure(6, weight=1)
 
         ttk.Label(root, text="原视频").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
         self.input_var = tk.StringVar()
         ttk.Entry(root, textvariable=self.input_var).grid(row=0, column=1, sticky="ew", pady=4)
         ttk.Button(root, text="选择", command=self._choose_video).grid(row=0, column=2, padx=(8, 0))
 
-        ttk.Label(root, text="目标语言").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
-        self.language_var = tk.StringVar(value="English")
-        ttk.Entry(root, textvariable=self.language_var).grid(row=1, column=1, sticky="ew", pady=4)
+        ttk.Label(root, text="原始地区").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
+        self.source_locale_combo = ttk.Combobox(
+            root,
+            values=[locale.label for locale in SOURCE_LOCALES],
+            state="readonly",
+        )
+        self.source_locale_combo.grid(row=1, column=1, columnspan=2, sticky="ew", pady=4)
+        self.source_locale_combo.current(0)
+        self.source_locale_combo.bind("<<ComboboxSelected>>", self._update_target_locales)
 
-        ttk.Label(root, text="目标国家/地区").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=4)
-        self.region_var = tk.StringVar(value="United States")
-        ttk.Entry(root, textvariable=self.region_var).grid(row=2, column=1, sticky="ew", pady=4)
+        ttk.Label(root, text="目标地区").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=4)
         self.locale_combo = ttk.Combobox(
             root,
-            values=[locale.label for locale in TARGET_LOCALES],
-            state="normal",
-            width=30,
+            state="readonly",
         )
-        self.locale_combo.grid(row=1, column=2, rowspan=2, padx=(8, 0), sticky="ew")
-        self.locale_combo.bind("<<ComboboxSelected>>", self._apply_locale)
+        self.locale_combo.grid(row=2, column=1, columnspan=2, sticky="ew", pady=4)
+        self._update_target_locales()
 
         refs = ttk.LabelFrame(root, text="参考素材（可选）", padding=8)
-        refs.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 8))
+        refs.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(8, 8))
         refs.columnconfigure(1, weight=1)
         ttk.Label(refs, text="人物参考图").grid(row=0, column=0, sticky="nw", padx=(0, 8))
         self.character_list = tk.Listbox(refs, height=3, exportselection=False)
@@ -80,10 +89,10 @@ class VideoLocalizerWindow(tk.Tk):
         ttk.Button(refs, text="清空", command=lambda: self._clear_refs("scene")).grid(row=1, column=3, pady=(6, 0))
 
         self.settings = SettingsPanel(root, self.base_config)
-        self.settings.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+        self.settings.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(0, 8))
 
         run_frame = ttk.LabelFrame(root, text="运行状态", padding=8)
-        run_frame.grid(row=5, column=0, columnspan=3, sticky="nsew")
+        run_frame.grid(row=6, column=0, columnspan=3, sticky="nsew")
         run_frame.columnconfigure(1, weight=1)
         for row, label in enumerate(("当前步骤", "进度", "任务 ID", "请求 ID", "重试次数")):
             ttk.Label(run_frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=3)
@@ -122,12 +131,6 @@ class VideoLocalizerWindow(tk.Tk):
         if path:
             self.input_var.set(path)
 
-    def _apply_locale(self, _event: object = None) -> None:
-        locale = locale_from_label(self.locale_combo.get())
-        if locale:
-            self.language_var.set(locale.language)
-            self.region_var.set(locale.region)
-
     def _add_refs(self, kind: str) -> None:
         paths = filedialog.askopenfilenames(
             title="选择参考图",
@@ -146,6 +149,21 @@ class VideoLocalizerWindow(tk.Tk):
             self.scene_refs.clear()
         self._refresh_ref_list(kind)
 
+    def _update_target_locales(self, _event: object | None = None) -> None:
+        source = source_locale_from_label(self.source_locale_combo.get())
+        current = self.locale_combo.get()
+        locales = target_locales_for_source(source)
+        labels = [locale.label for locale in locales]
+        self.locale_combo.configure(values=labels)
+        if current in labels:
+            self.locale_combo.set(current)
+        elif DEFAULT_TARGET_LOCALE_LABEL in labels:
+            self.locale_combo.set(DEFAULT_TARGET_LOCALE_LABEL)
+        elif labels:
+            self.locale_combo.current(0)
+        else:
+            self.locale_combo.set("")
+
     def _refresh_ref_list(self, kind: str) -> None:
         widget = self.character_list if kind == "character" else self.scene_list
         paths = self.character_refs if kind == "character" else self.scene_refs
@@ -157,17 +175,26 @@ class VideoLocalizerWindow(tk.Tk):
         input_path = Path(self.input_var.get().strip()).expanduser()
         if not input_path.is_file():
             raise ValueError("请选择存在的原视频文件")
+        source_locale = source_locale_from_label(self.source_locale_combo.get())
+        target_locale = locale_from_label(self.locale_combo.get())
+        if source_locale is None:
+            raise ValueError("请选择原始地区")
+        if target_locale is None:
+            raise ValueError("请选择目标地区")
         return JobSpec(
             input_video=input_path,
-            target_language=self.language_var.get().strip(),
-            target_region=self.region_var.get().strip(),
+            source_language=source_locale.language,
+            source_region=source_locale.region,
+            source_asr_language=source_locale.asr_language,
+            target_language=target_locale.language,
+            target_region=target_locale.region,
             character_refs=list(self.character_refs),
             scene_refs=list(self.scene_refs),
         )
 
     def _effective_config(self) -> AppConfig:
-        overrides = self.settings.get_non_empty_overrides()
-        return self.base_config.with_overrides(**overrides) if overrides else self.base_config
+        overrides = self.settings.get_overrides()
+        return self.base_config.with_overrides(**overrides)
 
     def _start(self) -> None:
         if self.worker and self.worker.is_alive():
@@ -175,6 +202,7 @@ class VideoLocalizerWindow(tk.Tk):
         try:
             spec = self._build_spec()
             config = self._effective_config()
+            self.settings.save()
         except Exception as exc:  # noqa: BLE001 - GUI validation message
             messagebox.showerror("输入错误", str(exc))
             return
@@ -267,10 +295,22 @@ class VideoLocalizerWindow(tk.Tk):
             return
         try:
             config = self._effective_config()
+            self.settings.save()
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("配置错误", str(exc))
             return
         self._run_in_background(config, self.current_spec, retry=True)
+
+    def _on_close(self) -> None:
+        """Persist settings before closing; ask a running worker to stop cooperatively."""
+
+        try:
+            self.settings.save()
+        except OSError as exc:
+            messagebox.showwarning("设置保存失败", f"本次设置未能保存：{exc}")
+        if self.worker and self.worker.is_alive():
+            self.cancel_event.set()
+        self.destroy()
 
     def _open_output(self) -> None:
         target = self.last_output.parent if self.last_output else self.base_config.work_dir

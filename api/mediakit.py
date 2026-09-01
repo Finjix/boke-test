@@ -277,7 +277,13 @@ class MediaKitClient:
             raw=result,
         )
 
-    def asr(self, audio_path: Path, *, raw_dir: Path | None = None) -> MediaKitTask:
+    def asr(
+        self,
+        audio_path: Path,
+        *,
+        language: str = "eng-US",
+        raw_dir: Path | None = None,
+    ) -> MediaKitTask:
         client_token = new_request_id()
         submit = self._run(
             [
@@ -288,6 +294,8 @@ class MediaKitClient:
                 str(audio_path),
                 "--content-type",
                 "speech",
+                "--language",
+                language,
                 "--enable-speaker-info",
                 "--enable-confidence",
                 "--client-token",

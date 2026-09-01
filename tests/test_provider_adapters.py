@@ -162,6 +162,32 @@ class ProviderAdapterTests(unittest.TestCase):
         self.assertEqual(run.call_count, 2)
         self.assertTrue(any("mediakit-cli" in str(call.args[0][0]) for call in run.call_args_list))
 
+    def test_mediakit_asr_passes_explicit_source_language(self) -> None:
+        client = MediaKitClient(self.config)
+        outputs = [
+            '{"task_id":"task_1","request_id":"req_1"}',
+            '{"result":{"subtitles":[]}}',
+        ]
+
+        def fake_run(command, **kwargs):
+            return __import__("subprocess").CompletedProcess(
+                command,
+                0,
+                stdout=outputs.pop(0),
+                stderr="cli log",
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("api.mediakit.subprocess.run", side_effect=fake_run) as run:
+                client.asr(
+                    Path(directory) / "voice.wav",
+                    language="eng-US",
+                    raw_dir=Path(directory) / "raw",
+                )
+        command = run.call_args_list[0].args[0]
+        language_index = command.index("--language")
+        self.assertEqual(command[language_index + 1], "eng-US")
+
     def test_mediakit_cli_timeout_is_internal_error(self) -> None:
         client = MediaKitClient(self.config)
         timeout = subprocess.TimeoutExpired(["mediakit-cli"], 1)

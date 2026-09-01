@@ -1,4 +1,5 @@
 .env
+.video-localizer-settings.json
 .venv/
 __pycache__/
 *.py[cod]

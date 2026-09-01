@@ -28,7 +28,7 @@ FFmpeg Windows 构建入口见
 .\tools\mediakit\mediakit-cli.exe version
 ```
 
-复制 `.env.example` 为 `.env`，填写 Ark、MediaKit、Seed-Audio Key 和当前账号控制台提供的 `SEEDANCE_MODEL_ID`。`.env` 不应提交到 Git。
+复制 `.env.example` 为 `.env`，填写 Ark、MediaKit、Seed-Audio Key 和当前账号控制台提供的 `SEEDANCE_MODEL_ID`。`.env` 不应提交到 Git。也可以直接在桌面窗口填写；窗口关闭时会将这些字段保存到项目根目录的 `.video-localizer-settings.json`，下次启动自动恢复。该文件含有本地密钥，已加入 `.gitignore`。
 
 ## 运行
 
@@ -38,13 +38,13 @@ FFmpeg Windows 构建入口见
 .\.venv\Scripts\python.exe app.py
 ```
 
-点击“开始”后会先执行 Preflight。任何依赖、凭证、模型权限或 Uguu 文件大小检查失败，正式 Pipeline 都不会启动。
+点击“开始”后会先执行 Preflight。任何依赖、凭证、模型权限或 Uguu 文件大小检查失败，正式 Pipeline 都不会启动。Uguu 仅作为内部临时上传 Provider 使用，桌面设置中不提供 Uguu 配置项。
 
 ## 处理链路
 
 1. ffprobe 检查输入并拒绝超过配置上限的视频。
 2. MediaKit 分离 `voice.wav` 和 `background.wav`。
-3. MediaKit 对人声执行 ASR 与 Speaker Diarization。
+3. 选择原始地区和目标地区；目标地区会排除与原始地区相同的选项，MediaKit 使用原始地区对应的语种提示执行 ASR 与 Speaker Diarization。
 4. 抽取说话时段关键帧，上传 Uguu 后交给 Doubao 分析角色。
 5. Doubao 一次翻译完整时间线。
 6. Seed-Audio 1.0 只生成干声对白，并执行时长校验。

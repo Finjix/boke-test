@@ -117,6 +117,9 @@ class JobSpec(StrictModel):
     input_video: Path
     target_language: str
     target_region: str
+    source_language: str | None = None
+    source_region: str | None = None
+    source_asr_language: str = "eng-US"
     character_refs: list[Path] = Field(default_factory=list)
     scene_refs: list[Path] = Field(default_factory=list)
     job_id: str | None = None
@@ -128,6 +131,37 @@ class JobSpec(StrictModel):
         if not value:
             raise ValueError("target language and region are required")
         return value
+
+    @field_validator("source_language", "source_region")
+    @classmethod
+    def optional_source_value(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("source language and region cannot be empty")
+        return value
+
+    @field_validator("source_asr_language")
+    @classmethod
+    def non_empty_source_asr_language(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("source ASR language cannot be empty")
+        return value
+
+    @model_validator(mode="after")
+    def validate_source_pair(self) -> "JobSpec":
+        if (self.source_language is None) != (self.source_region is None):
+            raise ValueError("source language and region must be provided together")
+        if (
+            self.source_language is not None
+            and self.source_region is not None
+            and (self.source_language, self.source_region)
+            == (self.target_language, self.target_region)
+        ):
+            raise ValueError("source and target regions must be different")
+        return self
 
     @field_validator("input_video")
     @classmethod

@@ -538,6 +538,7 @@ class VideoLocalizationPipeline:
         self._check_cancel()
         result = self.media_client.asr(
             state["voice_audio"],
+            language=context.spec.source_asr_language,
             raw_dir=self._raw_dir(context),
         )
         self._record_task(context, "mediakit_asr", result.task_id, result.request_id)
