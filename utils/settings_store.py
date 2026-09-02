@@ -15,7 +15,6 @@ from typing import Mapping
 SETTINGS_FILENAME = ".video-localizer-settings.json"
 EDITABLE_SETTING_NAMES = (
     "ark_api_key",
-    "mediakit_api_key",
     "seed_audio_api_key",
     "seedance_model_id",
 )
@@ -52,7 +51,7 @@ class SettingsStore:
             name: str(values.get(name, "")).strip()
             for name in EDITABLE_SETTING_NAMES
         }
-        payload = {"version": 1, "values": normalized}
+        payload = {"version": 2, "values": normalized}
         temporary_path = self.path.with_name(f".{self.path.name}.tmp")
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)

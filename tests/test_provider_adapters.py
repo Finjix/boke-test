@@ -2,21 +2,18 @@ from __future__ import annotations
 
 import base64
 import json
-import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
 
 from api.ark import ArkClient
 from api.common import ApiResponse
-from api.mediakit import MediaKitClient
 from api.seed_audio import SeedAudioClient
 from api.seedance import SeedanceClient
 from api.uguu import UguuClient
-from config import AppConfig
-from core.translator import translate_segments
-from core.timeline import normalize_asr
+from config import AppConfig, FIXED_DOUBAO_MODEL, FIXED_SEED_AUDIO_MODEL
+from core.localization import analyze_video
 from utils.errors import ProviderError
 
 
@@ -39,12 +36,14 @@ class FakeSession:
     def __init__(self, responses: list[FakeResponse]):
         self.responses = responses
         self.posts: list[dict] = []
+        self.gets: list[dict] = []
 
     def post(self, *args, **kwargs):
-        self.posts.append(kwargs)
+        self.posts.append({"args": args, **kwargs})
         return self.responses.pop(0)
 
     def get(self, *args, **kwargs):
+        self.gets.append({"args": args, **kwargs})
         return self.responses.pop(0)
 
 
@@ -52,81 +51,64 @@ class ProviderAdapterTests(unittest.TestCase):
     def setUp(self) -> None:
         self.config = AppConfig(
             ark_api_key="ark-key",
-            mediakit_api_key="media-key",
             seed_audio_api_key="audio-key",
             seedance_model_id="ep-test",
             max_retries=1,
         )
 
-    def test_seed_audio_decodes_base64_and_keeps_fixed_payload(self) -> None:
-        audio = base64.b64encode(b"wav-bytes").decode()
-        session = FakeSession([FakeResponse({"code": 0, "audio": audio, "original_duration": 2.0})])
-        client = SeedAudioClient(self.config, session=session)
-        with tempfile.TemporaryDirectory() as directory:
-            output = Path(directory) / "voice.wav"
-            result = client.generate_dialogue("DRY DIALOGUE ONLY", output)
-            self.assertEqual(output.read_bytes(), b"wav-bytes")
-            payload = session.posts[0]["json"]
-            self.assertEqual(payload["model"], "seed-audio-1.0")
-            self.assertNotIn("references", payload)
-            self.assertEqual(result.original_duration, 2.0)
-
-    def test_seed_audio_downloads_url_result(self) -> None:
-        session = FakeSession([
-            FakeResponse({"code": 0, "url": "https://example.test/audio.wav"}),
-            FakeResponse({}, content=b"url-audio"),
-        ])
-        client = SeedAudioClient(self.config, session=session)
-        with tempfile.TemporaryDirectory() as directory:
-            output = Path(directory) / "voice.wav"
-            client.generate_dialogue("DRY DIALOGUE ONLY", output)
-            self.assertEqual(output.read_bytes(), b"url-audio")
-
-    def test_ark_extracts_response_text(self) -> None:
-        response = ApiResponse(
-            data={"choices": [{"message": {"content": "{\"ok\":true}"}}]},
-            request_id="req",
+    def test_ark_sends_video_multimodal_input_fixed_model_and_json_mode(self) -> None:
+        session = FakeSession(
+            [FakeResponse({"choices": [{"message": {"content": "{\"ok\":true}"}}]})]
         )
+        client = ArkClient(self.config, session=session)
+        response = client.chat(
+            [
+                {"role": "system", "content": "return JSON"},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "video_url",
+                            "video_url": {"url": "https://uguu.se/input.mp4"},
+                        },
+                        {"type": "text", "text": "analyze"},
+                    ],
+                },
+            ],
+            response_format={"type": "json_object"},
+        )
+        payload = session.posts[0]["json"]
+        self.assertEqual(payload["model"], FIXED_DOUBAO_MODEL)
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertEqual(payload["messages"][1]["content"][0]["type"], "video_url")
         self.assertEqual(ArkClient.extract_text(response), '{"ok":true}')
 
-    def test_translation_retries_same_client_on_contract_error(self) -> None:
-        segments = normalize_asr(
-            {
-                "result": {
-                    "subtitles": [
-                        {
-                            "start_time": 0,
-                            "end_time": 1,
-                            "subtitle_text": "Hello",
-                            "speaker": "speaker_0",
-                        }
-                    ]
+    def test_analysis_retries_same_model_once_with_validation_error(self) -> None:
+        valid = {
+            "source_language": "en",
+            "target_language": "ar",
+            "speakers": [{"id": "speaker_1", "visual_hint": "off-screen narrator"}],
+            "dialogues": [
+                {
+                    "speaker_id": "speaker_1",
+                    "start_ms": 0,
+                    "end_ms": 1000,
+                    "source_text": "Hello",
+                    "target_text": "مرحبا",
                 }
-            }
-        )
+            ],
+        }
 
         class FakeArk:
-            def __init__(self):
-                self.calls = 0
+            def __init__(self) -> None:
+                self.calls: list[tuple[list[dict], dict]] = []
 
             def chat(self, messages, **kwargs):
-                self.calls += 1
-                if self.calls == 1:
-                    return ApiResponse(
-                        {"choices": [{"message": {"content": "not json"}}]},
-                        "req-1",
-                    )
+                self.calls.append((messages, kwargs))
+                content = "not json" if len(self.calls) == 1 else json.dumps(valid, ensure_ascii=False)
                 return ApiResponse(
-                    {
-                        "choices": [
-                            {
-                                "message": {
-                                    "content": '[{"id":"seg_0001","speaker":"speaker_0","start":0,"end":1,"text":"مرحبا"}]'
-                                }
-                            }
-                        ]
-                    },
-                    "req-2",
+                    {"choices": [{"message": {"content": content}}]},
+                    f"req-{len(self.calls)}",
                 )
 
             @staticmethod
@@ -134,73 +116,63 @@ class ProviderAdapterTests(unittest.TestCase):
                 return response.data["choices"][0]["message"]["content"]
 
         client = FakeArk()
-        result = translate_segments(
+        result = analyze_video(
             client,
-            segments,
-            target_language="Arabic",
-            target_region="Gulf",
-            validation_attempts=2,
+            "https://uguu.se/input.mp4",
+            target_language="ar",
+            target_locale="ar-SA",
+            duration_seconds=2,
         )
-        self.assertEqual(client.calls, 2)
-        self.assertEqual(result[0].text, "مرحبا")
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(
+            client.calls[0][1]["response_format"],
+            {"type": "json_object"},
+        )
+        self.assertIn("Validation error", client.calls[1][0][1]["content"][1]["text"])
+        self.assertEqual(result.dialogues[0].target_text, "مرحبا")
 
-    def test_mediakit_adapter_keeps_cli_as_only_entrypoint(self) -> None:
-        client = MediaKitClient(self.config)
-        outputs = [
-            '{"task_id":"task_1","request_id":"req_1"}',
-            '{"result":{"voice_audio_url":"https://x/voice.wav","background_audio_url":"https://x/bg.wav"}}',
-        ]
-
-        def fake_run(command, **kwargs):
-            return __import__("subprocess").CompletedProcess(command, 0, stdout=outputs.pop(0), stderr="cli log")
-
+    def test_seed_audio_uses_complete_reference_audio_and_fixed_payload(self) -> None:
+        audio = base64.b64encode(b"wav-bytes").decode()
+        session = FakeSession([FakeResponse({"code": 0, "audio": audio})])
+        client = SeedAudioClient(self.config, session=session)
         with tempfile.TemporaryDirectory() as directory:
-            with patch("api.mediakit.subprocess.run", side_effect=fake_run) as run:
-                result = client.separate_voice(Path(directory) / "input.mp4", raw_dir=Path(directory) / "raw")
-        self.assertEqual(result.task_id, "task_1")
-        self.assertEqual(result.result["voice_audio_url"], "https://x/voice.wav")
-        self.assertEqual(run.call_count, 2)
-        self.assertTrue(any("mediakit-cli" in str(call.args[0][0]) for call in run.call_args_list))
-
-    def test_mediakit_asr_passes_explicit_source_language(self) -> None:
-        client = MediaKitClient(self.config)
-        outputs = [
-            '{"task_id":"task_1","request_id":"req_1"}',
-            '{"result":{"subtitles":[]}}',
-        ]
-
-        def fake_run(command, **kwargs):
-            return __import__("subprocess").CompletedProcess(
-                command,
-                0,
-                stdout=outputs.pop(0),
-                stderr="cli log",
+            output = Path(directory) / "localized_audio.wav"
+            result = client.generate_localized_audio(
+                "Use @Audio1 and recreate the complete scene",
+                "https://uguu.se/original_audio.wav",
+                output,
             )
+            self.assertEqual(output.read_bytes(), b"wav-bytes")
+        payload = session.posts[0]["json"]
+        self.assertEqual(payload["model"], FIXED_SEED_AUDIO_MODEL)
+        self.assertEqual(
+            payload["references"],
+            [{"audio_url": "https://uguu.se/original_audio.wav"}],
+        )
+        self.assertEqual(result.request_id, session.posts[0]["headers"]["X-Api-Request-Id"])
+        self.assertFalse(hasattr(client, "generate_dialogue"))
 
+    def test_seed_audio_downloads_url_result(self) -> None:
+        session = FakeSession(
+            [
+                FakeResponse({"code": 0, "url": "https://example.test/audio.wav"}),
+                FakeResponse({}, content=b"url-audio"),
+            ]
+        )
+        client = SeedAudioClient(self.config, session=session)
         with tempfile.TemporaryDirectory() as directory:
-            with patch("api.mediakit.subprocess.run", side_effect=fake_run) as run:
-                client.asr(
-                    Path(directory) / "voice.wav",
-                    language="eng-US",
-                    raw_dir=Path(directory) / "raw",
-                )
-        command = run.call_args_list[0].args[0]
-        language_index = command.index("--language")
-        self.assertEqual(command[language_index + 1], "eng-US")
-
-    def test_mediakit_cli_timeout_is_internal_error(self) -> None:
-        client = MediaKitClient(self.config)
-        timeout = subprocess.TimeoutExpired(["mediakit-cli"], 1)
-        with patch("api.mediakit.subprocess.run", side_effect=timeout):
-            with self.assertRaises(ProviderError) as raised:
-                client.schema("audio", "separate-voice")
-        self.assertEqual(raised.exception.error_code, "CLI_TIMEOUT")
-        self.assertTrue(raised.exception.retryable)
+            output = Path(directory) / "localized_audio.wav"
+            client.generate_localized_audio(
+                "complete scene",
+                "https://uguu.se/original.wav",
+                output,
+            )
+            self.assertEqual(output.read_bytes(), b"url-audio")
 
     def test_uguu_upload_uses_files_array_and_validates_https_result(self) -> None:
-        session = FakeSession([
-            FakeResponse({"success": True, "files": [{"url": "https://uguu.se/file.mp4"}]}),
-        ])
+        session = FakeSession(
+            [FakeResponse({"success": True, "files": [{"url": "https://uguu.se/file.mp4"}]})]
+        )
         client = UguuClient(self.config, session=session)
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "input.mp4"
@@ -209,27 +181,30 @@ class ProviderAdapterTests(unittest.TestCase):
         self.assertEqual(asset.remote_url, "https://uguu.se/file.mp4")
         self.assertIn("files[]", session.posts[0]["files"])
 
-    def test_seedance_create_and_poll_preserve_model_and_discard_policy(self) -> None:
-        session = FakeSession([
-            FakeResponse({"id": "task-1"}),
-            FakeResponse({"id": "task-1", "status": "queued"}),
-            FakeResponse({"id": "task-1", "status": "succeeded", "content": {"video_url": "https://x/video.mp4"}}),
-        ])
-        client = SeedanceClient(self.config, session=session, sleeper=lambda _seconds: None)
-        task = client.create_task([{"type": "text", "text": "localize"}])
-        result = client.wait_task(task.task_id)
+    def test_seedance_disables_audio_generation(self) -> None:
+        session = FakeSession([FakeResponse({"id": "task-1"})])
+        client = SeedanceClient(self.config, session=session)
+        task = client.create_task(
+            [
+                {"type": "video_url", "video_url": {"url": "https://uguu.se/video.mp4"}},
+                {"type": "audio_url", "audio_url": {"url": "https://uguu.se/audio.wav"}},
+            ]
+        )
+        payload = session.posts[0]["json"]
         self.assertEqual(task.task_id, "task-1")
-        self.assertEqual(result.data["status"], "succeeded")
-        self.assertTrue(session.posts[0]["json"]["generate_audio"])
-        self.assertEqual(session.posts[0]["json"]["model"], "ep-test")
+        self.assertEqual(payload["model"], "ep-test")
+        self.assertFalse(payload["generate_audio"])
 
     def test_seedance_poll_timeout_is_bounded(self) -> None:
         class AlwaysQueuedSession:
             def get(self, *args, **kwargs):
                 return FakeResponse({"id": "task-1", "status": "queued"})
 
-        session = AlwaysQueuedSession()
-        client = SeedanceClient(self.config, session=session, sleeper=lambda _seconds: None)
+        client = SeedanceClient(
+            self.config,
+            session=AlwaysQueuedSession(),
+            sleeper=lambda _seconds: None,
+        )
         with self.assertRaises(ProviderError) as raised:
             client.wait_task("task-1", max_wait_seconds=0.001)
         self.assertEqual(raised.exception.error_code, "TASK_TIMEOUT")

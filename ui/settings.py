@@ -25,7 +25,6 @@ class SettingsPanel(ttk.LabelFrame):
         stored = self._store.load()
         rows = (
             ("Ark API Key", "ark_api_key", True, config.ark_api_key),
-            ("MediaKit API Key", "mediakit_api_key", True, config.mediakit_api_key),
             ("豆包语音 API Key", "seed_audio_api_key", True, config.seed_audio_api_key),
             ("Seedance Model/Endpoint ID", "seedance_model_id", False, config.seedance_model_id),
         )

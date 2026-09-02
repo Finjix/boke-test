@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import unittest
 
+import utils.json_parser as json_parser
 from utils.errors import JsonContractError, ProviderError
-from utils.json_parser import parse_cli_json, parse_strict_json
+from utils.json_parser import parse_strict_json
 from utils.retry import retry_call
 
 
@@ -14,9 +15,8 @@ class JsonAndRetryTests(unittest.TestCase):
         with self.assertRaises(JsonContractError):
             parse_strict_json("{} explanation")
 
-    def test_cli_json_allows_log_lines(self) -> None:
-        value = parse_cli_json("log line\n{\"task_id\": \"task_1\"}\n")
-        self.assertEqual(value["task_id"], "task_1")
+    def test_legacy_cli_json_parser_was_removed(self) -> None:
+        self.assertFalse(hasattr(json_parser, "parse_cli_json"))
 
     def test_retry_uses_bounded_backoff_without_sleeping_in_test(self) -> None:
         calls = 0

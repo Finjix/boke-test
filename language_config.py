@@ -1,9 +1,4 @@
-"""Data-driven language/country choices for the GUI.
-
-The catalog is only a user-interface convenience.  Actual availability is
-determined by the configured account and the selected model; no language is
-used as a Provider fallback.
-"""
+"""Data-driven target-language choices for the GUI."""
 
 from __future__ import annotations
 
@@ -13,53 +8,37 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class TargetLocale:
     language: str
+    language_code: str
     region: str
+    locale_code: str
     label: str
-
-
-@dataclass(frozen=True)
-class SourceLocale:
-    language: str
-    region: str
-    label: str
-    asr_language: str
-
-
-# MediaKit's current ASR contract exposes explicit language hints for these
-# two language families. Keep the source selector limited to supported values
-# instead of sending a guessed language code to the CLI.
-SOURCE_LOCALES: tuple[SourceLocale, ...] = (
-    SourceLocale("English", "United States", "United States (English)", "eng-US"),
-    SourceLocale("English", "United Kingdom", "United Kingdom (English)", "eng-US"),
-    SourceLocale("Chinese", "China", "China (Chinese)", "cmn-Hans-CN"),
-)
 
 
 TARGET_LOCALES: tuple[TargetLocale, ...] = (
-    TargetLocale("English", "United States", "United States (English)"),
-    TargetLocale("English", "United Kingdom", "United Kingdom (English)"),
-    TargetLocale("Spanish", "Spain", "Spain (Spanish)"),
-    TargetLocale("Spanish", "Latin America", "Latin America (Spanish)"),
-    TargetLocale("Portuguese", "Brazil", "Brazil (Portuguese)"),
-    TargetLocale("French", "France", "France (French)"),
-    TargetLocale("French", "Canada", "Canada (French)"),
-    TargetLocale("German", "Germany", "Germany (German)"),
-    TargetLocale("Italian", "Italy", "Italy (Italian)"),
-    TargetLocale("Arabic", "Gulf", "Gulf (Arabic)"),
-    TargetLocale("Turkish", "Turkey", "Turkey (Turkish)"),
-    TargetLocale("Dutch", "Netherlands", "Netherlands (Dutch)"),
-    TargetLocale("Polish", "Poland", "Poland (Polish)"),
-    TargetLocale("Russian", "Russia", "Russia (Russian)"),
-    TargetLocale("Ukrainian", "Ukraine", "Ukraine (Ukrainian)"),
-    TargetLocale("Hebrew", "Israel", "Israel (Hebrew)"),
-    TargetLocale("Hindi", "India", "India (Hindi)"),
-    TargetLocale("Bengali", "Bangladesh", "Bangladesh (Bengali)"),
-    TargetLocale("Japanese", "Japan", "Japan (Japanese)"),
-    TargetLocale("Korean", "South Korea", "South Korea (Korean)"),
-    TargetLocale("Thai", "Thailand", "Thailand (Thai)"),
-    TargetLocale("Vietnamese", "Vietnam", "Vietnam (Vietnamese)"),
-    TargetLocale("Indonesian", "Indonesia", "Indonesia (Indonesian)"),
-    TargetLocale("Malay", "Malaysia", "Malaysia (Malay)"),
+    TargetLocale("English", "en", "United States", "en-US", "United States (English)"),
+    TargetLocale("English", "en", "United Kingdom", "en-GB", "United Kingdom (English)"),
+    TargetLocale("Spanish", "es", "Spain", "es-ES", "Spain (Spanish)"),
+    TargetLocale("Spanish", "es", "Latin America", "es-419", "Latin America (Spanish)"),
+    TargetLocale("Portuguese", "pt", "Brazil", "pt-BR", "Brazil (Portuguese)"),
+    TargetLocale("French", "fr", "France", "fr-FR", "France (French)"),
+    TargetLocale("French", "fr", "Canada", "fr-CA", "Canada (French)"),
+    TargetLocale("German", "de", "Germany", "de-DE", "Germany (German)"),
+    TargetLocale("Italian", "it", "Italy", "it-IT", "Italy (Italian)"),
+    TargetLocale("Arabic", "ar", "Gulf", "ar-SA", "Gulf (Arabic)"),
+    TargetLocale("Turkish", "tr", "Turkey", "tr-TR", "Turkey (Turkish)"),
+    TargetLocale("Dutch", "nl", "Netherlands", "nl-NL", "Netherlands (Dutch)"),
+    TargetLocale("Polish", "pl", "Poland", "pl-PL", "Poland (Polish)"),
+    TargetLocale("Russian", "ru", "Russia", "ru-RU", "Russia (Russian)"),
+    TargetLocale("Ukrainian", "uk", "Ukraine", "uk-UA", "Ukraine (Ukrainian)"),
+    TargetLocale("Hebrew", "he", "Israel", "he-IL", "Israel (Hebrew)"),
+    TargetLocale("Hindi", "hi", "India", "hi-IN", "India (Hindi)"),
+    TargetLocale("Bengali", "bn", "Bangladesh", "bn-BD", "Bangladesh (Bengali)"),
+    TargetLocale("Japanese", "ja", "Japan", "ja-JP", "Japan (Japanese)"),
+    TargetLocale("Korean", "ko", "South Korea", "ko-KR", "South Korea (Korean)"),
+    TargetLocale("Thai", "th", "Thailand", "th-TH", "Thailand (Thai)"),
+    TargetLocale("Vietnamese", "vi", "Vietnam", "vi-VN", "Vietnam (Vietnamese)"),
+    TargetLocale("Indonesian", "id", "Indonesia", "id-ID", "Indonesia (Indonesian)"),
+    TargetLocale("Malay", "ms", "Malaysia", "ms-MY", "Malaysia (Malay)"),
 )
 
 
@@ -71,22 +50,3 @@ def locale_from_label(label: str) -> TargetLocale | None:
         if locale.label == label:
             return locale
     return None
-
-
-def source_locale_from_label(label: str) -> SourceLocale | None:
-    for locale in SOURCE_LOCALES:
-        if locale.label == label:
-            return locale
-    return None
-
-
-def target_locales_for_source(source: SourceLocale | None) -> tuple[TargetLocale, ...]:
-    """Return target choices excluding the exact source language/region pair."""
-
-    if source is None:
-        return TARGET_LOCALES
-    return tuple(
-        locale
-        for locale in TARGET_LOCALES
-        if (locale.language, locale.region) != (source.language, source.region)
-    )

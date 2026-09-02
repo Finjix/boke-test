@@ -72,7 +72,10 @@ class SeedanceClient:
         payload: dict[str, Any] = {
             "model": self.config.seedance_model_id,
             "content": content,
-            "generate_audio": True,
+            # The localized audio is supplied as a reference condition and is
+            # muxed after generation. Do not spend a second generation on an
+            # audio track that will be discarded.
+            "generate_audio": False,
             "resolution": "1080p",
             "ratio": "adaptive",
             "watermark": False,

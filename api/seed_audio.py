@@ -1,11 +1,9 @@
-"""Seed-Audio 1.0 dry-dialogue adapter."""
+"""Seed Audio 1.0 full-scene localization adapter."""
 
 from __future__ import annotations
 
 import base64
 import binascii
-import math
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,13 +20,23 @@ from utils.retry import retry_call
 from video_config import AUDIO_SAMPLE_RATE
 
 
+def _https(value: str, label: str) -> str:
+    if not value.startswith("https://"):
+        raise ProviderError(
+            f"{label} must be an HTTPS URL",
+            provider="seed-audio",
+            error_code="INVALID_REFERENCE_URL",
+            retryable=False,
+        )
+    return value
+
+
 @dataclass(frozen=True)
 class GeneratedAudio:
     output_path: Path
     request_id: str
     raw: dict[str, Any]
     raw_path: Path | None = None
-    original_duration: float | None = None
 
 
 @dataclass
@@ -47,10 +55,18 @@ class SeedAudioClient:
         if self.session is None:
             self.session = requests.Session()
 
-    def build_payload(self, prompt: str) -> dict[str, Any]:
+    def build_payload(self, prompt: str, reference_audio_url: str) -> dict[str, Any]:
+        if not prompt.strip():
+            raise ProviderError(
+                "Seed Audio prompt cannot be empty",
+                provider="seed-audio",
+                error_code="PROMPT_EMPTY",
+                retryable=False,
+            )
         return {
             "model": FIXED_SEED_AUDIO_MODEL,
             "text_prompt": prompt,
+            "references": [{"audio_url": _https(reference_audio_url, "reference audio")}],
             "audio_config": {
                 "format": "wav",
                 "sample_rate": AUDIO_SAMPLE_RATE,
@@ -61,15 +77,16 @@ class SeedAudioClient:
             "watermark": {},
         }
 
-    def generate_dialogue(
+    def generate_localized_audio(
         self,
         prompt: str,
+        reference_audio_url: str,
         output_path: Path,
         *,
         raw_dir: Path | None = None,
     ) -> GeneratedAudio:
         request_id = new_request_id()
-        payload = self.build_payload(prompt)
+        payload = self.build_payload(prompt, reference_audio_url)
 
         def operation() -> ApiResponse:
             try:
@@ -273,40 +290,9 @@ class SeedAudioClient:
                 payload=data,
                 retryable=False,
             )
-        original_duration = None
-        if data.get("original_duration") is not None:
-            try:
-                original_duration = float(data["original_duration"])
-            except (TypeError, ValueError) as exc:
-                raise ProviderError(
-                    "Seed-Audio returned an invalid original_duration",
-                    provider="seed-audio",
-                    request_id=response.request_id,
-                    raw_response_path=str(response.raw_path) if response.raw_path else None,
-                    error_code="INVALID_DURATION",
-                    retryable=False,
-                ) from exc
-            if not math.isfinite(original_duration) or original_duration <= 0:
-                raise ProviderError(
-                    "Seed-Audio returned a non-positive or non-finite original_duration",
-                    provider="seed-audio",
-                    request_id=response.request_id,
-                    raw_response_path=str(response.raw_path) if response.raw_path else None,
-                    error_code="INVALID_DURATION",
-                    retryable=False,
-                )
         return GeneratedAudio(
             output_path=output_path,
             request_id=response.request_id,
             raw=data,
             raw_path=response.raw_path,
-            original_duration=original_duration,
         )
-
-    def check_access(self, raw_dir: Path | None = None) -> GeneratedAudio:
-        with tempfile.TemporaryDirectory(prefix="seed-audio-preflight-") as directory:
-            return self.generate_dialogue(
-                "DRY DIALOGUE ONLY. Say: preflight check.",
-                Path(directory) / "preflight.wav",
-                raw_dir=raw_dir,
-            )

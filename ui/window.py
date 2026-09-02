@@ -15,14 +15,11 @@ from core.models import JobSpec, PipelineStage
 from core.pipeline import VideoLocalizationPipeline
 from language_config import (
     DEFAULT_TARGET_LOCALE_LABEL,
-    SOURCE_LOCALES,
+    TARGET_LOCALES,
     locale_from_label,
-    source_locale_from_label,
-    target_locales_for_source,
 )
 from ui.log_panel import LogPanel
 from ui.settings import SettingsPanel
-from utils.errors import VideoLocalizerError
 
 
 class VideoLocalizerWindow(tk.Tk):
@@ -49,33 +46,27 @@ class VideoLocalizerWindow(tk.Tk):
         root = ttk.Frame(self, padding=12)
         root.pack(fill="both", expand=True)
         root.columnconfigure(1, weight=1)
-        root.rowconfigure(6, weight=1)
+        root.rowconfigure(4, weight=1)
 
         ttk.Label(root, text="原视频").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
         self.input_var = tk.StringVar()
         ttk.Entry(root, textvariable=self.input_var).grid(row=0, column=1, sticky="ew", pady=4)
         ttk.Button(root, text="选择", command=self._choose_video).grid(row=0, column=2, padx=(8, 0))
 
-        ttk.Label(root, text="原始地区").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
-        self.source_locale_combo = ttk.Combobox(
-            root,
-            values=[locale.label for locale in SOURCE_LOCALES],
-            state="readonly",
-        )
-        self.source_locale_combo.grid(row=1, column=1, columnspan=2, sticky="ew", pady=4)
-        self.source_locale_combo.current(0)
-        self.source_locale_combo.bind("<<ComboboxSelected>>", self._update_target_locales)
-
-        ttk.Label(root, text="目标地区").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Label(root, text="目标地区").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
         self.locale_combo = ttk.Combobox(
             root,
+            values=[locale.label for locale in TARGET_LOCALES],
             state="readonly",
         )
-        self.locale_combo.grid(row=2, column=1, columnspan=2, sticky="ew", pady=4)
-        self._update_target_locales()
+        self.locale_combo.grid(row=1, column=1, columnspan=2, sticky="ew", pady=4)
+        if DEFAULT_TARGET_LOCALE_LABEL in [locale.label for locale in TARGET_LOCALES]:
+            self.locale_combo.set(DEFAULT_TARGET_LOCALE_LABEL)
+        else:
+            self.locale_combo.current(0)
 
         refs = ttk.LabelFrame(root, text="参考素材（可选）", padding=8)
-        refs.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(8, 8))
+        refs.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(8, 8))
         refs.columnconfigure(1, weight=1)
         ttk.Label(refs, text="人物参考图").grid(row=0, column=0, sticky="nw", padx=(0, 8))
         self.character_list = tk.Listbox(refs, height=3, exportselection=False)
@@ -89,14 +80,14 @@ class VideoLocalizerWindow(tk.Tk):
         ttk.Button(refs, text="清空", command=lambda: self._clear_refs("scene")).grid(row=1, column=3, pady=(6, 0))
 
         self.settings = SettingsPanel(root, self.base_config)
-        self.settings.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+        self.settings.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(0, 8))
 
         run_frame = ttk.LabelFrame(root, text="运行状态", padding=8)
-        run_frame.grid(row=6, column=0, columnspan=3, sticky="nsew")
+        run_frame.grid(row=4, column=0, columnspan=3, sticky="nsew")
         run_frame.columnconfigure(1, weight=1)
         for row, label in enumerate(("当前步骤", "进度", "任务 ID", "请求 ID", "重试次数")):
             ttk.Label(run_frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=3)
-        self.stage_var = tk.StringVar(value="PENDING")
+        self.stage_var = tk.StringVar(value="待处理")
         self.progress_var = tk.StringVar(value="0%")
         self.task_var = tk.StringVar(value="-")
         self.request_var = tk.StringVar(value="-")
@@ -149,21 +140,6 @@ class VideoLocalizerWindow(tk.Tk):
             self.scene_refs.clear()
         self._refresh_ref_list(kind)
 
-    def _update_target_locales(self, _event: object | None = None) -> None:
-        source = source_locale_from_label(self.source_locale_combo.get())
-        current = self.locale_combo.get()
-        locales = target_locales_for_source(source)
-        labels = [locale.label for locale in locales]
-        self.locale_combo.configure(values=labels)
-        if current in labels:
-            self.locale_combo.set(current)
-        elif DEFAULT_TARGET_LOCALE_LABEL in labels:
-            self.locale_combo.set(DEFAULT_TARGET_LOCALE_LABEL)
-        elif labels:
-            self.locale_combo.current(0)
-        else:
-            self.locale_combo.set("")
-
     def _refresh_ref_list(self, kind: str) -> None:
         widget = self.character_list if kind == "character" else self.scene_list
         paths = self.character_refs if kind == "character" else self.scene_refs
@@ -175,19 +151,14 @@ class VideoLocalizerWindow(tk.Tk):
         input_path = Path(self.input_var.get().strip()).expanduser()
         if not input_path.is_file():
             raise ValueError("请选择存在的原视频文件")
-        source_locale = source_locale_from_label(self.source_locale_combo.get())
         target_locale = locale_from_label(self.locale_combo.get())
-        if source_locale is None:
-            raise ValueError("请选择原始地区")
         if target_locale is None:
             raise ValueError("请选择目标地区")
         return JobSpec(
             input_video=input_path,
-            source_language=source_locale.language,
-            source_region=source_locale.region,
-            source_asr_language=source_locale.asr_language,
-            target_language=target_locale.language,
+            target_language=target_locale.language_code,
             target_region=target_locale.region,
+            target_locale=target_locale.locale_code,
             character_refs=list(self.character_refs),
             scene_refs=list(self.scene_refs),
         )
@@ -255,9 +226,17 @@ class VideoLocalizerWindow(tk.Tk):
         if event.get("job_id"):
             self.current_job_id = str(event["job_id"])
         stage = str(event.get("stage", ""))
+        stage_labels = {
+            PipelineStage.ANALYZING.value: "分析视频",
+            PipelineStage.GENERATING_AUDIO.value: "生成本地化音频",
+            PipelineStage.GENERATING_VIDEO.value: "生成本地化视频",
+            PipelineStage.MUXING.value: "最终合成",
+            PipelineStage.COMPLETED.value: "已完成",
+            PipelineStage.FAILED.value: "失败",
+        }
         progress = int(event.get("progress", 0) or 0)
         if stage:
-            self.stage_var.set(stage)
+            self.stage_var.set(stage_labels.get(stage, stage))
         self.progress_var.set(f"{progress}%")
         self.progress_value.set(progress)
         event_type = event.get("event_type")

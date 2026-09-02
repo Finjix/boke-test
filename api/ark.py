@@ -1,4 +1,4 @@
-"""REST adapter for the configured Ark Chat model."""
+"""REST adapter for the configured Ark multimodal model."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import Any
 import requests
 
 from api.common import ApiResponse, response_request_id
-from config import AppConfig
+from config import AppConfig, FIXED_DOUBAO_MODEL
 from utils.artifacts import persist_raw_json, persist_raw_text
 from utils.errors import ProviderError, ValidationError
 from utils.ids import new_request_id
@@ -43,6 +43,13 @@ class ArkClient:
     last_request_id: str | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
+        if self.config.doubao_model != FIXED_DOUBAO_MODEL:
+            raise ProviderError(
+                f"Doubao model must be {FIXED_DOUBAO_MODEL}",
+                provider="ark",
+                error_code="MODEL_NOT_ALLOWED",
+                retryable=False,
+            )
         if self.session is None:
             self.session = requests.Session()
 
@@ -56,6 +63,7 @@ class ArkClient:
         *,
         stage: str = "ark_chat",
         raw_dir: Path | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> ApiResponse:
         request_id = new_request_id()
         self.last_request_id = request_id
@@ -65,6 +73,8 @@ class ArkClient:
             "thinking": {"type": "disabled"},
             "stream": False,
         }
+        if response_format is not None:
+            payload["response_format"] = response_format
 
         def operation() -> ApiResponse:
             try:
@@ -158,14 +168,4 @@ class ArkClient:
                 if self.logger
                 else None
             ),
-        )
-
-    def check_access(self, raw_dir: Path | None = None) -> ApiResponse:
-        return self.chat(
-            [
-                {"role": "system", "content": "只输出 JSON。"},
-                {"role": "user", "content": "返回 {\"ok\":true}。"},
-            ],
-            stage="preflight_ark_chat",
-            raw_dir=raw_dir,
         )

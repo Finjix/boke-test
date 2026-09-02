@@ -1,0 +1,227 @@
+"""Video-analysis contract and validation for the v2 localization pipeline."""
+
+from __future__ import annotations
+
+import json
+import math
+from pathlib import Path
+from typing import Any
+
+from core.models import LocalizationDialogue, LocalizationScript
+from utils.errors import ValidationError
+from utils.json_parser import parse_strict_json
+from utils.logger import JobLogger
+
+
+ANALYSIS_PROMPT_VERSION = "v2"
+ANALYSIS_CORRECTION_ATTEMPTS = 2
+
+
+def _https(value: str, label: str) -> str:
+    if not value.startswith("https://"):
+        raise ValidationError(f"{label} must be an HTTPS URL")
+    return value
+
+
+def localization_script_schema() -> dict[str, Any]:
+    """Return the JSON contract embedded in the analysis prompt."""
+
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["source_language", "target_language", "speakers", "dialogues"],
+        "properties": {
+            "source_language": {"type": "string"},
+            "target_language": {"type": "string"},
+            "speakers": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["id", "visual_hint"],
+                    "properties": {
+                        "id": {"type": "string"},
+                        "visual_hint": {"type": "string"},
+                    },
+                },
+            },
+            "dialogues": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "speaker_id",
+                        "start_ms",
+                        "end_ms",
+                        "source_text",
+                        "target_text",
+                    ],
+                    "properties": {
+                        "speaker_id": {"type": "string"},
+                        "start_ms": {"type": "integer", "minimum": 0},
+                        "end_ms": {"type": "integer", "minimum": 0},
+                        "source_text": {"type": "string"},
+                        "target_text": {"type": "string"},
+                    },
+                },
+            },
+        },
+    }
+
+
+def build_video_analysis_messages(
+    source_video_url: str,
+    *,
+    target_language: str,
+    target_locale: str,
+    correction_error: str | None = None,
+) -> list[dict[str, Any]]:
+    """Build one multimodal Ark request for analysis and translation."""
+
+    source_video_url = _https(source_video_url, "source video")
+    schema = json.dumps(localization_script_schema(), ensure_ascii=False, separators=(",", ":"))
+    system = (
+        "Analyze the complete video using both visual and audio information.\n"
+        "Identify every speaking character and maintain a stable speaker ID for the same "
+        "character throughout the video.\n"
+        "Determine which character speaks each dialogue line using both voice information "
+        "and visible speaking behavior.\n"
+        "Transcribe the original dialogue and translate it directly into the requested "
+        "target language.\n"
+        "Preserve the original meaning, tone, conversational relationship, and approximate "
+        "dialogue duration.\n"
+        "Return dialogue start and end timestamps in integer milliseconds.\n"
+        "Do not describe voice timbre, music, ambience, or sound effects.\n"
+        "Use only the following JSON object shape and return valid JSON only:\n"
+        f"{schema}"
+    )
+    user_text = (
+        f"Translate the dialogue into language code {target_language} for locale {target_locale}. "
+        "Detect the source language automatically. Keep dialogues sorted by start_ms. "
+        "If a character is an off-screen narrator, use a stable speaker ID and visual_hint "
+        "of 'off-screen narrator'."
+    )
+    if correction_error:
+        user_text += (
+            " The previous response failed local contract validation. Correct it and return "
+            f"the complete JSON object again. Validation error: {correction_error}"
+        )
+    return [
+        {"role": "system", "content": system},
+        {
+            "role": "user",
+            "content": [
+                {"type": "video_url", "video_url": {"url": source_video_url}},
+                {"type": "text", "text": user_text},
+            ],
+        },
+    ]
+
+
+def _overlap_is_abnormally_large(
+    left: LocalizationDialogue,
+    right: LocalizationDialogue,
+) -> bool:
+    overlap = min(left.end_ms, right.end_ms) - max(left.start_ms, right.start_ms)
+    if overlap <= 0:
+        return False
+    shorter_duration = min(left.end_ms - left.start_ms, right.end_ms - right.start_ms)
+    return overlap > shorter_duration * 0.5
+
+
+def validate_localization_script(
+    value: LocalizationScript | dict[str, Any],
+    *,
+    target_language: str,
+    duration_seconds: float,
+) -> LocalizationScript:
+    """Validate the model result against the job target and source duration."""
+
+    try:
+        script = value if isinstance(value, LocalizationScript) else LocalizationScript.model_validate(value)
+    except Exception as exc:  # Pydantic's detailed error is not user-facing
+        raise ValidationError(f"invalid localization script: {exc}") from exc
+
+    if script.target_language.casefold() != target_language.casefold():
+        raise ValidationError(
+            f"analysis target_language does not match requested language: "
+            f"{script.target_language} != {target_language}"
+        )
+    if not math.isfinite(duration_seconds) or duration_seconds <= 0:
+        raise ValidationError("source duration must be positive and finite")
+    duration_ms = duration_seconds * 1000
+    previous: LocalizationDialogue | None = None
+    seen: set[tuple[str, int, int, str, str]] = set()
+    for dialogue in script.dialogues:
+        if dialogue.end_ms > duration_ms:
+            raise ValidationError(
+                f"dialogue {dialogue.speaker_id} ends after source video duration"
+            )
+        key = (
+            dialogue.speaker_id,
+            dialogue.start_ms,
+            dialogue.end_ms,
+            dialogue.source_text,
+            dialogue.target_text,
+        )
+        if key in seen:
+            raise ValidationError("localization script contains duplicate dialogue")
+        seen.add(key)
+        if previous is not None:
+            if (dialogue.start_ms, dialogue.end_ms) < (previous.start_ms, previous.end_ms):
+                raise ValidationError("dialogues must be sorted by start_ms")
+            if _overlap_is_abnormally_large(previous, dialogue):
+                raise ValidationError("dialogues contain an abnormally large overlap")
+        previous = dialogue
+    return script
+
+
+def analyze_video(
+    client: Any,
+    source_video_url: str,
+    *,
+    target_language: str,
+    target_locale: str,
+    duration_seconds: float,
+    raw_dir: Path | None = None,
+    logger: JobLogger | None = None,
+) -> LocalizationScript:
+    """Call the configured model once, with one same-model correction attempt."""
+
+    last_error: Exception | None = None
+    correction_error: str | None = None
+    for attempt in range(1, ANALYSIS_CORRECTION_ATTEMPTS + 1):
+        messages = build_video_analysis_messages(
+            source_video_url,
+            target_language=target_language,
+            target_locale=target_locale,
+            correction_error=correction_error,
+        )
+        try:
+            response = client.chat(
+                messages,
+                stage=f"video_analysis_attempt_{attempt}",
+                raw_dir=raw_dir,
+                response_format={"type": "json_object"},
+            )
+            content = client.extract_text(response)
+            value = parse_strict_json(content, description="video analysis response")
+            return validate_localization_script(
+                value,
+                target_language=target_language,
+                duration_seconds=duration_seconds,
+            )
+        except ValidationError as exc:
+            last_error = exc
+            correction_error = str(exc)
+            if logger is not None:
+                logger.warning(
+                    "video analysis response failed contract validation",
+                    attempt=attempt,
+                    error=str(exc),
+                )
+            if attempt == ANALYSIS_CORRECTION_ATTEMPTS:
+                raise
+    assert last_error is not None
+    raise last_error

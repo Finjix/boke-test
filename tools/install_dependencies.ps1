@@ -1,6 +1,5 @@
 param(
-    [switch]$SkipFfmpeg,
-    [switch]$SkipMediaKit
+    [switch]$SkipFfmpeg
 )
 
 $ErrorActionPreference = "Stop"
@@ -111,23 +110,6 @@ if (-not $SkipFfmpeg) {
     }
 }
 
-if (-not $SkipMediaKit) {
-    $MediaKitArchive = Join-Path $DownloadRoot "mediakit-cli_0.2.1_windows_amd64.zip"
-    Get-And-VerifyFile `
-        -Url "https://github.com/volcengine/mediakit-cli/releases/download/v0.2.1/mediakit-cli_0.2.1_windows_amd64.zip" `
-        -Destination $MediaKitArchive `
-        -Sha256Url "https://github.com/volcengine/mediakit-cli/releases/download/v0.2.1/checksums.txt"
-
-    $MediaKitBin = Join-Path $ProjectRoot "tools\mediakit\mediakit-cli.exe"
-    if (-not (Test-Path -LiteralPath $MediaKitBin)) {
-        New-Item -ItemType Directory -Force -Path (Join-Path $ProjectRoot "tools\mediakit") | Out-Null
-        tar.exe -xf $MediaKitArchive -C (Join-Path $ProjectRoot "tools\mediakit")
-        if ($LASTEXITCODE -ne 0) {
-            throw "MediaKit CLI archive extraction failed."
-        }
-    }
-}
-
 if (-not $SkipFfmpeg) {
     if (-not (Test-Path -LiteralPath (Join-Path $ProjectRoot "tools\ffmpeg\bin\ffmpeg.exe"))) {
         throw "FFmpeg was not installed."
@@ -136,13 +118,8 @@ if (-not $SkipFfmpeg) {
         throw "FFprobe was not installed."
     }
 }
-if (-not $SkipMediaKit) {
-    if (-not (Test-Path -LiteralPath (Join-Path $ProjectRoot "tools\mediakit\mediakit-cli.exe"))) {
-        throw "MediaKit CLI was not installed."
-    }
-}
 
-if (-not $SkipFfmpeg -and -not $SkipMediaKit) {
+if (-not $SkipFfmpeg) {
     $RequirementsHash = Get-Sha256 -Path (Join-Path $ProjectRoot "requirements.txt")
     $MarkerText = "Python=3.13.15`r`nRequirementsSHA256=$RequirementsHash`r`n"
     [IO.File]::WriteAllText($ReadyMarker, $MarkerText, [Text.UTF8Encoding]::new($false))

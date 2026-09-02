@@ -179,7 +179,7 @@ class UguuClient:
                     data = response.json()
                     if raw_dir is not None:
                         raw_path = persist_raw_json(raw_dir, "preflight_uguu", data)
-                except ValueError as exc:
+                except ValueError:
                     if raw_dir is not None:
                         raw_path = persist_raw_text(
                             raw_dir,
@@ -187,13 +187,6 @@ class UguuClient:
                             getattr(response, "text", ""),
                             extension="txt",
                         )
-                    raise ProviderError(
-                        "Uguu endpoint returned non-JSON response",
-                        provider="uguu",
-                        status_code=status,
-                        raw_response_path=str(raw_path) if raw_path else None,
-                        retryable=status == 429 or status >= 500,
-                    ) from exc
             except requests.exceptions.RequestException as exc:
                 raise ProviderError(
                     f"Uguu endpoint is not reachable: {exc}",

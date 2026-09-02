@@ -6,14 +6,12 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from api.ark import ArkClient
-from api.mediakit import MediaKitClient
 from api.seed_audio import SeedAudioClient
 from api.seedance import SeedanceClient
 from api.uguu import UguuClient
-from config import AppConfig
+from config import AppConfig, FIXED_DOUBAO_MODEL, FIXED_SEED_AUDIO_MODEL
 from core.models import JobSpec, PreflightCheck, PreflightReport
-from utils.errors import PreflightError, ProviderError
+from utils.errors import PreflightError
 from utils.logger import JobLogger
 
 
@@ -27,16 +25,12 @@ class PreflightRunner:
         self,
         config: AppConfig,
         *,
-        media_client: Any | None = None,
-        ark_client: Any | None = None,
         seed_audio_client: Any | None = None,
         seedance_client: Any | None = None,
         uguu_client: Any | None = None,
         logger: JobLogger | None = None,
     ):
         self.config = config
-        self.media_client = media_client or MediaKitClient(config, logger=logger)
-        self.ark_client = ark_client or ArkClient(config, logger=logger)
         self.seed_audio_client = seed_audio_client or SeedAudioClient(config, logger=logger)
         self.seedance_client = seedance_client or SeedanceClient(config, logger=logger)
         self.uguu_client = uguu_client or UguuClient(config, logger=logger)
@@ -51,8 +45,8 @@ class PreflightRunner:
     ) -> PreflightReport:
         checks: list[PreflightCheck] = []
 
-        def add(name: str, passed: bool, detail: str) -> None:
-            check = PreflightCheck(name=name, passed=passed, detail=detail)
+        def add(name: str, passed: bool, detail: str, *, fatal: bool = True) -> None:
+            check = PreflightCheck(name=name, passed=passed, detail=detail, fatal=fatal)
             checks.append(check)
             if self.logger:
                 level = "info" if passed else "error"
@@ -61,23 +55,32 @@ class PreflightRunner:
         for name, executable in (
             ("ffmpeg", self.config.ffmpeg_bin),
             ("ffprobe", self.config.ffprobe_bin),
-            ("mediakit-cli", self.config.mediakit_cli_bin),
         ):
             passed = _executable(executable)
             add(name, passed, executable if passed else f"not found: {executable}")
 
         for name, value in (
             ("ARK_API_KEY", self.config.ark_api_key),
-            ("MEDIAKIT_API_KEY", self.config.mediakit_api_key),
             ("SEED_AUDIO_API_KEY", self.config.seed_audio_api_key),
             ("SEEDANCE_MODEL_ID", self.config.seedance_model_id),
         ):
             add(name, bool(value), "configured" if value else "missing")
 
+        add("DOUBAO_MODEL", self.config.doubao_model == FIXED_DOUBAO_MODEL, self.config.doubao_model)
         add(
             "SEED_AUDIO_MODEL",
-            self.config.seed_audio_model == "seed-audio-1.0",
+            self.config.seed_audio_model == FIXED_SEED_AUDIO_MODEL,
             self.config.seed_audio_model,
+        )
+        add(
+            "UGUU_UPLOAD_URL",
+            self.config.uguu_upload_url.startswith("https://"),
+            self.config.uguu_upload_url,
+        )
+        add(
+            "UGUU_EXPIRE_HOURS",
+            self.config.uguu_expire_hours > 0,
+            str(self.config.uguu_expire_hours),
         )
 
         source_paths = [spec.input_video, *spec.character_refs, *spec.scene_refs]
@@ -109,61 +112,21 @@ class PreflightRunner:
         except OSError as exc:
             add("work directory", False, str(exc))
 
-        cli_available = _executable(self.config.mediakit_cli_bin)
-        if cli_available:
-            try:
-                self.media_client.doctor(raw_dir=work_dir / "json" / "raw")
-                add("mediakit-cli doctor", True, "passed")
-            except Exception as exc:  # noqa: BLE001 - surfaced as a check
-                add("mediakit-cli doctor", False, str(exc))
-            for domain, tool in (("audio", "separate-voice"), ("video", "asr-subtitles")):
-                try:
-                    self.media_client.schema(
-                        domain,
-                        tool,
-                        raw_dir=work_dir / "json" / "raw",
-                    )
-                    add(f"schema:{domain}/{tool}", True, "available")
-                except Exception as exc:  # noqa: BLE001 - surfaced as a check
-                    add(f"schema:{domain}/{tool}", False, str(exc))
-        else:
-            add("mediakit-cli doctor", False, "CLI unavailable")
-            add("schema:audio/separate-voice", False, "CLI unavailable")
-            add("schema:video/asr-subtitles", False, "CLI unavailable")
-
         if execute_remote_checks:
-            if self.config.ark_api_key:
-                try:
-                    self.ark_client.check_access(raw_dir=work_dir / "json" / "raw")
-                    add("Ark Chat access", True, "minimal request succeeded")
-                except Exception as exc:  # noqa: BLE001
-                    add("Ark Chat access", False, str(exc))
-            else:
-                add("Ark Chat access", False, "API key missing")
-
-            if self.config.seed_audio_api_key:
-                try:
-                    self.seed_audio_client.check_access(raw_dir=work_dir / "json" / "raw")
-                    add("Seed-Audio access", True, "minimal request succeeded")
-                except Exception as exc:  # noqa: BLE001
-                    add("Seed-Audio access", False, str(exc))
-            else:
-                add("Seed-Audio access", False, "API key missing")
+            try:
+                self.uguu_client.check_access(raw_dir=work_dir / "json" / "raw")
+                add("Uguu upload endpoint", True, "endpoint reachable")
+            except Exception as exc:  # noqa: BLE001 - surfaced as a check
+                add("Uguu upload endpoint", False, str(exc))
 
             if self.config.ark_api_key and self.config.seedance_model_id:
                 try:
                     self.seedance_client.check_access(raw_dir=work_dir / "json" / "raw")
                     add("Seedance endpoint access", True, "endpoint probe succeeded")
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001 - surfaced as a check
                     add("Seedance endpoint access", False, str(exc))
             else:
                 add("Seedance endpoint access", False, "API key or model ID missing")
-
-            try:
-                self.uguu_client.check_access(raw_dir=work_dir / "json" / "raw")
-                add("Uguu upload endpoint", True, "endpoint reachable")
-            except Exception as exc:  # noqa: BLE001
-                add("Uguu upload endpoint", False, str(exc))
 
         passed = all(check.passed for check in checks if check.fatal)
         return PreflightReport(passed=passed, checks=checks)
@@ -181,8 +144,6 @@ def run_preflight(
     clients = clients or {}
     runner = PreflightRunner(
         config,
-        media_client=clients.get("mediakit"),
-        ark_client=clients.get("ark"),
         seed_audio_client=clients.get("seed_audio"),
         seedance_client=clients.get("seedance"),
         uguu_client=clients.get("uguu"),
@@ -198,7 +159,6 @@ def run_preflight(
 def require_preflight(report: PreflightReport) -> None:
     if report.passed:
         return
-    failed = [f"{check.name}: {check.detail}" for check in report.checks if not check.passed]
     raise PreflightError(
         "Preflight failed; formal Pipeline was not started",
         checks=[check.model_dump(mode="json") for check in report.checks],
