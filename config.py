@@ -22,6 +22,9 @@ from video_config import SEEDANCE_MAX_DURATION, SEEDANCE_TASK_TIMEOUT
 
 
 FIXED_DOUBAO_MODEL = "doubao-seed-2-0-lite-260428"
+FIXED_MINIMAX_H3_MODEL = "MiniMax-H3"
+MINIMAX_CN_BASE_URL = "https://api.minimax.cn"
+MINIMAX_H3_RESOLUTIONS = frozenset({"768P", "2K"})
 
 
 def _text(env: Mapping[str, str], name: str, default: str = "") -> str:
@@ -82,6 +85,11 @@ class AppConfig:
     ark_api_key: str = ""
     ark_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
     doubao_model: str = FIXED_DOUBAO_MODEL
+    minimax_api_key: str = ""
+    minimax_base_url: str = MINIMAX_CN_BASE_URL
+    minimax_model: str = FIXED_MINIMAX_H3_MODEL
+    minimax_task_timeout: int = 7200
+    minimax_resolution: str = "2K"
     seedance_model_id: str = ""
     seedance_max_duration: int = SEEDANCE_MAX_DURATION
     seedance_task_timeout: int = SEEDANCE_TASK_TIMEOUT
@@ -103,6 +111,10 @@ class AppConfig:
             "AppConfig("
             f"ark_base_url={self.ark_base_url!r}, "
             f"doubao_model={self.doubao_model!r}, "
+            f"minimax_base_url={self.minimax_base_url!r}, "
+            f"minimax_model={self.minimax_model!r}, "
+            f"minimax_task_timeout={self.minimax_task_timeout!r}, "
+            f"minimax_resolution={self.minimax_resolution!r}, "
             f"seedance_model_id={self.seedance_model_id!r}, "
             f"seedance_max_duration={self.seedance_max_duration!r}, "
             f"seedance_task_timeout={self.seedance_task_timeout!r}, "
@@ -141,6 +153,15 @@ class AppConfig:
                 "https://ark.cn-beijing.volces.com/api/v3",
             ).rstrip("/"),
             doubao_model=_text(source, "DOUBAO_MODEL", FIXED_DOUBAO_MODEL),
+            minimax_api_key=_text(source, "MINIMAX_API_KEY"),
+            minimax_base_url=_text(
+                source,
+                "MINIMAX_BASE_URL",
+                MINIMAX_CN_BASE_URL,
+            ).rstrip("/"),
+            minimax_model=FIXED_MINIMAX_H3_MODEL,
+            minimax_task_timeout=_int(source, "MINIMAX_TASK_TIMEOUT", 7200),
+            minimax_resolution=_text(source, "MINIMAX_RESOLUTION", "2K").upper(),
             seedance_model_id=_text(source, "SEEDANCE_MODEL_ID"),
             seedance_max_duration=_int(source, "SEEDANCE_MAX_DURATION", SEEDANCE_MAX_DURATION),
             seedance_task_timeout=_int(source, "SEEDANCE_TASK_TIMEOUT", SEEDANCE_TASK_TIMEOUT),
@@ -171,6 +192,18 @@ class AppConfig:
             raise ConfigurationError(f"DOUBAO_MODEL is fixed to {FIXED_DOUBAO_MODEL}")
         if not self.ark_base_url.startswith(("http://", "https://")):
             raise ConfigurationError("ARK_BASE_URL must be an HTTP(S) URL")
+        if self.minimax_model != FIXED_MINIMAX_H3_MODEL:
+            raise ConfigurationError(
+                f"MINIMAX_MODEL is fixed to {FIXED_MINIMAX_H3_MODEL}"
+            )
+        if not self.minimax_base_url.startswith(("http://", "https://")):
+            raise ConfigurationError("MINIMAX_BASE_URL must be an HTTP(S) URL")
+        if self.minimax_task_timeout <= 0:
+            raise ConfigurationError("MINIMAX_TASK_TIMEOUT must be positive")
+        if self.minimax_resolution not in MINIMAX_H3_RESOLUTIONS:
+            raise ConfigurationError(
+                f"MINIMAX_RESOLUTION must be one of {sorted(MINIMAX_H3_RESOLUTIONS)}"
+            )
         if not self.uguu_upload_url.startswith("https://"):
             raise ConfigurationError("UGUU_UPLOAD_URL must be an HTTPS URL")
         if self.seedance_max_duration <= 0:
@@ -206,3 +239,8 @@ class AppConfig:
             if not value:
                 missing.append(name)
         return missing
+
+    def missing_h3_runtime_values(self) -> list[str]:
+        """Return credentials required by the active MiniMax H3 workflow."""
+
+        return ["MINIMAX_API_KEY"] if not self.minimax_api_key else []

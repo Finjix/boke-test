@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -131,11 +131,15 @@ class UguuClient:
                     payload=data,
                     retryable=False,
                 )
+            uploaded_at = datetime.now(timezone.utc)
             return UploadedAsset(
                 local_path=path,
                 remote_url=url,
-                uploaded_at=datetime.now(timezone.utc).isoformat(),
+                uploaded_at=uploaded_at.isoformat(),
                 kind=kind,
+                expires_at=(
+                    uploaded_at + timedelta(hours=self.config.uguu_expire_hours)
+                ).isoformat(),
             )
 
         return retry_call(

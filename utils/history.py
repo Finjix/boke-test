@@ -14,7 +14,7 @@ from utils.errors import ValidationError
 
 
 HISTORY_INDEX_VERSION = 1
-HISTORY_PIPELINE_VERSION = 4
+HISTORY_PIPELINE_VERSION = 5
 _JOB_ID = re.compile(r"^[^\\/:*?\"<>|]+$")
 
 
@@ -59,7 +59,7 @@ class HistoryStore:
             )
 
     def load_context(self, job_id: str) -> JobContext:
-        """Load one current v4 checkpoint, rejecting traversal and bad data."""
+        """Load one checkpoint for read-only inspection."""
 
         checkpoint = self._checkpoint_path(job_id)
         if not checkpoint.is_file():
@@ -212,6 +212,7 @@ class HistoryStore:
             job_dir=context.job_dir,
             source_name=Path(context.spec.input_video).name,
             target_locale=context.spec.target_locale,
+            provider=context.provider,
             stage=context.stage.value,
             status=self._status_from_context(context),
             created_at=context.created_at,
@@ -226,6 +227,29 @@ class HistoryStore:
     @staticmethod
     def _status_from_context(context: JobContext) -> str:
         latest_node = context.node_executions[-1] if context.node_executions else None
+        if context.provider == "minimax_h3":
+            if context.stage == PipelineStage.WAITING_FOR_SEGMENTS:
+                return "waiting_for_segments"
+            if context.stage == PipelineStage.WAITING_FOR_NEXT_SEGMENT:
+                return "waiting_for_next_segment"
+            if context.stage == PipelineStage.GENERATING_SEGMENT:
+                if latest_node and latest_node.status == NodeExecutionStatus.RUNNING:
+                    return "h3_running" if latest_node.task_id else "h3_interrupted"
+                return "h3_interrupted"
+            if context.stage == PipelineStage.FAILED:
+                if (
+                    latest_node
+                    and latest_node.status == NodeExecutionStatus.RUNNING
+                    and latest_node.task_id
+                ):
+                    return "h3_running"
+                if latest_node and latest_node.status == NodeExecutionStatus.FAILED:
+                    return "h3_failed"
+                return "failed"
+            if context.stage == PipelineStage.COMPLETED:
+                return "completed"
+            if context.stage == PipelineStage.PREPARING:
+                return "preparing"
         package_value = context.artifacts.get("localization_package")
         if package_value:
             package_path = Path(package_value)

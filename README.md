@@ -1,43 +1,58 @@
-# AI 多语言视频本地化工具
+# MiniMax H3 视频转化工具
 
-这是一个 Python/Tkinter 桌面工具：Doubao Seed 2.0 Lite 负责视频理解、角色对应、对白时间轴、翻译和目标文化规划，Seedance 负责生成本地化画面、目标语言对白、口型、BGM、环境声和音效，并输出完整有声视频。任务支持在 Doubao 节点后暂停审阅，所有节点结果和执行尝试都会持久化到本地。
+这是一个 Python/Tkinter 桌面工具，使用 MiniMax H3 直接将源视频转化为目标地区版本。活动链路不再调用 Doubao，也不提供用户参考视频上传：源视频始终是唯一的内容与镜头核心，用户参考图只用于风格或外观提示。
 
 ## 安装
 
-要求：Windows 10/11 x64，首次启动时可以访问互联网。
+要求：Windows 10/11 x64。首次启动需要安装依赖并访问网络：
 
 ```powershell
 .\tools\install_dependencies.ps1
 ```
 
-也可以直接双击根目录的 `start_app.cmd`。脚本会准备项目内 Python、Python 依赖和用于媒体信息检查的 ffprobe；运行时和下载缓存位于被 Git 忽略的目录，不要求系统级 Python、pip、Node.js 或其他 CLI。
+复制 `.env.example` 为 `.env`，填写 `MINIMAX_API_KEY`。模型固定为 `MiniMax-H3`，国内端点固定默认值 `https://api.minimax.cn`。API Key 也可以在桌面设置中填写，保存到项目根目录的本地设置文件；不会写入任务日志。
 
-复制 `.env.example` 为 `.env`，填写 Ark API Key 和当前账号控制台提供的 `SEEDANCE_MODEL_ID`。`DOUBAO_MODEL` 由应用固定为 `doubao-seed-2-0-lite-260428`，不要猜测或替换 Seedance Endpoint ID。`.env` 不应提交到 Git。也可以直接在桌面窗口填写 Ark API Key 和 Seedance Model/Endpoint ID；窗口关闭时会保存这些字段。
+官方规格与异步接口说明见 [MiniMax 视频生成文档](https://platform.minimaxi.com/docs/guides/video-generation)。H3 的视频生成结果仍需人工验收，提示词和参考素材不能保证像素级人物/场景一致，也不能保证任何内容审核一定通过。
 
-## 运行
+## 处理规则
+
+- 源视频不超过 15 秒：直接创建一个 H3 转化任务。
+- 源视频超过 15 秒：只建立本地任务并提示上传片段，不会自动创建 H3 任务。片段必须按顺序上传，每片 4–15 秒。
+- 第一片使用当前原片和用户参考图。
+- 后续片段使用当前原片作为内容核心，并在 H3 参考视频总时长允许时附带上一片生成结果，保持人物、场景和风格连续。若当前片段加上一片超过 H3 的 15 秒参考视频总时长限制，则使用原始主视频均匀抽取的 4 张一致性参考帧；这时用户参考图最多保留 5 张，系统不会静默丢弃第 6–9 张。
+- H3 只开放官方稳定对白语言集合：Arabic、Chinese、English、French、German、Italian、Japanese、Korean、Portuguese、Russian、Spanish。地区和 locale 会进入提示词，但 H3 没有具体国家方言保证。
+- 全部片段完成后执行本地拼接。每个片段的原始输入、上传记录、请求响应、task ID、失败原因和输出都单独保存。
+
+## 脚本操作
+
+```powershell
+# 新任务；短视频会直接创建 H3，长视频返回 job_id 并等待片段
+.\.venv\Scripts\python.exe h3_workflow.py start --video .\case\测试.mp4 --language ar --region "Saudi Arabia" --locale ar-SA
+
+# 长视频按顺序追加片段
+.\.venv\Scripts\python.exe h3_workflow.py append-segment --job-id <job_id> --video .\片段01.mp4
+.\.venv\Scripts\python.exe h3_workflow.py append-segment --job-id <job_id> --video .\片段02.mp4
+
+# 轮询中断后继续原 task；失败后只重试当前片段
+.\.venv\Scripts\python.exe h3_workflow.py continue --job-id <job_id>
+.\.venv\Scripts\python.exe h3_workflow.py retry --job-id <job_id>
+.\.venv\Scripts\python.exe h3_workflow.py finish --job-id <job_id>
+
+# 只读取本地历史，不调用网络
+.\.venv\Scripts\python.exe h3_workflow.py history
+```
+
+## 本地持久化
+
+每个任务的事实来源是 `work/<job_id>/checkpoint.json`，快速索引是 `work/history.json`。H3 每次尝试保存在 `json/nodes/h3/segment_<n>/attempt_<n>/`，包括 `content.json`、原始响应、最终响应、失败记录和输出文件。应用重启时只读取历史，不自动轮询或创建任务；明确点击继续或重试后才访问 H3。
+
+## 运行与测试
 
 ```powershell
 .\runtime\python3.13.15\python.exe app.py
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -m compileall -q .
+git diff --check
 ```
 
-窗口选择原视频、目标地区和可选人物/场景参考图。源语言由视频多模态分析自动识别。默认目标地区为 `Gulf (Arabic)`，对应 `ar-SA`。
-
-## 处理链路
-
-1. `analyzing`：ffprobe 检查视频并记录时长，将原视频和参考素材上传为临时 HTTPS Uguu URL；Doubao 一次完成视频理解、角色映射、对白时间轴、目标语言翻译和文化本地化规划，保存为 `json/localization_package.json`。
-2. `waiting_for_approval`（默认）：窗口只展示 Doubao 的结构化 JSON，用户确认无误后才允许进入 Seedance。设置中的“自动进入 Seedance”开关可以恢复一键直跑。
-3. `generating_video`：根据 Localization Package 动态生成 Seedance Prompt，使用原视频和参考素材生成包含目标语言对白、BGM、环境声、音效和口型同步的完整有声视频。
-4. 输出直接保存为 `output/final_<target_locale>.mp4`，不执行独立配音、音轨替换、混音、二次变速或二次 lip-sync。
-
-每个任务的 checkpoint 保存在 `work/<job_id>/checkpoint.json`，原始 Provider 响应保存在 `work/<job_id>/json/raw/`。任务使用 v4 checkpoint；旧链路 checkpoint 会在“执行历史”中标记为不可恢复，必须新建任务。每次 Seedance 尝试单独保存到 `json/nodes/seedance/attempt_<n>/`，其中包含输入 content、结果或失败记录和输出文件。
-
-应用重启后不会自动调用云端。执行历史栏目会扫描本地 checkpoint，并提供“确认并执行 Seedance”“继续等待 Seedance”和“重试失败节点”。如果轮询中断但云端任务仍存在，会继续使用原 Seedance task ID；只有已经终态失败的 Seedance 才会创建新的 task。Doubao Localization Package 不会因为 Seedance 重试而重新执行。
-
-## 测试
-
-```powershell
-.\runtime\python3.13.15\python.exe -m unittest discover -s tests -v
-.\runtime\python3.13.15\python.exe -m compileall -q .
-```
-
-单元测试使用 HTTP 和 Provider 替身，不会触发真实云端任务。真实验收需要已配置凭证和模型权限，并重点检查阿拉伯语、多角色对应、画外音、BGM/环境音/音效、口型同步以及最终文件同时包含视频和音频流。
+单元测试使用 Provider 和 HTTP 替身，不会创建真实 H3 任务。真实验收应重点检查目标语言、人物/场景连续性、镜头节奏、音频流和审核结果。

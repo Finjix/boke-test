@@ -13,8 +13,13 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, m
 class PipelineStage(str, Enum):
     """Public pipeline stages shown by the desktop application."""
 
+    PREPARING = "preparing"
+    WAITING_FOR_SEGMENTS = "waiting_for_segments"
+    GENERATING_SEGMENT = "generating_segment"
+    WAITING_FOR_NEXT_SEGMENT = "waiting_for_next_segment"
     ANALYZING = "analyzing"
     WAITING_FOR_APPROVAL = "waiting_for_approval"
+    WAITING_FOR_SEGMENT_APPROVAL = "waiting_for_segment_approval"
     GENERATING_VIDEO = "generating_video"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -25,7 +30,7 @@ class StrictModel(BaseModel):
 
 
 class ExecutionMode(str, Enum):
-    """Whether the pipeline pauses after the Doubao node."""
+    """Compatibility value retained for callers shared with the v4 pipeline."""
 
     MANUAL = "manual"
     AUTO = "auto"
@@ -53,16 +58,13 @@ class ProviderCall(StrictModel):
 
 
 class NodeExecution(StrictModel):
-    """One logical execution of a pipeline node.
-
-    A Doubao execution can contain two provider calls because the existing
-    same-model contract correction is retained. Each Seedance retry is a new
-    node execution and therefore remains auditable.
-    """
+    """One auditable provider execution."""
 
     node: str
     attempt: int
     status: NodeExecutionStatus
+    provider: str = ""
+    segment_index: StrictInt | None = None
     started_at: str
     finished_at: str | None = None
     request_ids: list[str] = Field(default_factory=list)
@@ -80,6 +82,10 @@ class PipelineResult(StrictModel):
     stage: PipelineStage
     output_path: Path | None = None
     package_path: Path | None = None
+    plan_path: Path | None = None
+    segment_index: int | None = None
+    next_segment_index: int | None = None
+    message: str | None = None
     action_required: str | None = None
 
     # Keep the completed-result ergonomics of the old ``Path`` return value
@@ -106,6 +112,7 @@ class HistoryEntry(StrictModel):
     job_dir: Path
     source_name: str = ""
     target_locale: str = ""
+    provider: str = "doubao_seedance"
     stage: str = "unknown"
     status: str = "unknown"
     created_at: str = ""
@@ -273,6 +280,8 @@ class JobSpec(StrictModel):
     target_locale: str
     character_refs: list[Path] = Field(default_factory=list)
     scene_refs: list[Path] = Field(default_factory=list)
+    reference_images: list[Path] = Field(default_factory=list)
+    transformation_instruction: str = ""
     job_id: str | None = None
 
     @field_validator("target_language", "target_region", "target_locale")
@@ -302,23 +311,115 @@ class JobSpec(StrictModel):
     def source_is_path(cls, value: Path) -> Path:
         return Path(value).expanduser()
 
+    @field_validator("reference_images")
+    @classmethod
+    def reference_image_limit(cls, value: list[Path]) -> list[Path]:
+        if len(value) > 9:
+            raise ValueError("at most 9 reference images may be uploaded")
+        return [Path(item).expanduser() for item in value]
+
+    @field_validator("transformation_instruction")
+    @classmethod
+    def normalize_transformation_instruction(cls, value: str) -> str:
+        return value.strip()
+
 
 class UploadedAsset(StrictModel):
     local_path: Path
     remote_url: str
     uploaded_at: str
     kind: str
+    expires_at: str | None = None
+
+
+class H3Attempt(StrictModel):
+    """One persisted MiniMax H3 task attempt."""
+
+    attempt: StrictInt
+    status: NodeExecutionStatus
+    started_at: str
+    finished_at: str | None = None
+    request_id: str | None = None
+    task_id: str | None = None
+    video_url: str | None = None
+    content_artifact: str | None = None
+    create_response_artifact: str | None = None
+    poll_response_artifacts: list[str] = Field(default_factory=list)
+    final_response_artifact: str | None = None
+    failure_artifact: str | None = None
+    input_artifacts: list[str] = Field(default_factory=list)
+    output_artifact: str | None = None
+    error: dict[str, Any] | None = None
+
+    @field_validator("attempt")
+    @classmethod
+    def positive_attempt(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("H3 attempt must be positive")
+        return value
+
+
+class H3Segment(StrictModel):
+    """A user-supplied source slice and all H3 attempts for that slice."""
+
+    index: StrictInt
+    source_duration_seconds: float
+    normalized_duration_seconds: StrictInt
+    prompt: str
+    source_artifact: str
+    status: str = "pending"
+    source_asset: UploadedAsset | None = None
+    reference_assets: list[UploadedAsset] = Field(default_factory=list)
+    original_frame_assets: list[UploadedAsset] = Field(default_factory=list)
+    previous_output_asset: UploadedAsset | None = None
+    reference_strategy: str = "user_images"
+    reference_video_duration_seconds: float | None = None
+    attempts: list[H3Attempt] = Field(default_factory=list)
+    active_attempt: StrictInt | None = None
+    output_artifact: str | None = None
+
+    @field_validator("prompt", "source_artifact", "reference_strategy")
+    @classmethod
+    def non_empty_segment_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("H3 segment fields cannot be empty")
+        return value
+
+    @field_validator("index", "normalized_duration_seconds")
+    @classmethod
+    def positive_segment_numbers(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("H3 segment numbers must be positive")
+        return value
+
+    @model_validator(mode="after")
+    def validate_segment_contract(self) -> "H3Segment":
+        if self.source_duration_seconds < 4 or self.source_duration_seconds > 15:
+            raise ValueError("H3 source segment must be between 4 and 15 seconds")
+        if not 4 <= self.normalized_duration_seconds <= 15:
+            raise ValueError("H3 normalized duration must be between 4 and 15 seconds")
+        if self.status not in {"pending", "running", "completed", "failed"}:
+            raise ValueError(f"Unsupported H3 segment status: {self.status}")
+        if (
+            self.reference_video_duration_seconds is not None
+            and self.reference_video_duration_seconds < 0
+        ):
+            raise ValueError("reference video duration cannot be negative")
+        return self
 
 
 class JobContext(StrictModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
-    pipeline_version: int = 4
+    pipeline_version: int = 5
     job_id: str
     job_dir: Path
     spec: JobSpec
+    provider: str = "doubao_seedance"
     execution_mode: ExecutionMode = ExecutionMode.MANUAL
     approval_status: ApprovalStatus = ApprovalStatus.NOT_REQUIRED
+    pending_approval: str | None = None
     approved_at: str | None = None
     created_at: str
     updated_at: str
@@ -328,6 +429,9 @@ class JobContext(StrictModel):
     request_ids: dict[str, str] = Field(default_factory=dict)
     retry_counts: dict[str, int] = Field(default_factory=dict)
     node_executions: list[NodeExecution] = Field(default_factory=list)
+    h3_segments: list[H3Segment] = Field(default_factory=list)
+    source_master_duration_seconds: float | None = None
+    source_master_artifact: str | None = None
     artifacts: dict[str, str] = Field(default_factory=dict)
     cache_key: dict[str, str] = Field(default_factory=dict)
     metrics: dict[str, Any] = Field(default_factory=dict)

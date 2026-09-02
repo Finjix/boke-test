@@ -1545,3 +1545,52 @@ class VideoLocalizationPipeline:
             "analysis_prompt_version": ANALYSIS_PROMPT_VERSION,
             "seedance_prompt_version": SEEDANCE_PROMPT_VERSION,
         }
+
+
+# Keep the v4 implementation available for its existing checkpoint format and
+# compatibility tests. New callers without explicitly injected legacy clients
+# use the H3 implementation below; old Ark/Seedance injections remain isolated.
+LegacyVideoLocalizationPipeline = VideoLocalizationPipeline
+from core.h3_pipeline import H3VideoLocalizationPipeline
+
+
+class VideoLocalizationPipeline:
+    """Facade with MiniMax H3 as the active provider."""
+
+    def __init__(
+        self,
+        config: AppConfig,
+        *,
+        minimax_client: Any | None = None,
+        h3_client: Any | None = None,
+        ark_client: Any | None = None,
+        uguu_client: Any | None = None,
+        seedance_client: Any | None = None,
+        event_callback: Callable[[dict[str, Any]], None] | None = None,
+        cancel_event: threading.Event | None = None,
+        history_store: HistoryStore | None = None,
+        ffmpeg_bin: str | None = None,
+    ) -> None:
+        if ark_client is not None or seedance_client is not None:
+            self._impl = LegacyVideoLocalizationPipeline(
+                config,
+                ark_client=ark_client,
+                uguu_client=uguu_client,
+                seedance_client=seedance_client,
+                event_callback=event_callback,
+                cancel_event=cancel_event,
+                history_store=history_store,
+            )
+        else:
+            self._impl = H3VideoLocalizationPipeline(
+                config,
+                minimax_client=minimax_client or h3_client,
+                uguu_client=uguu_client,
+                event_callback=event_callback,
+                cancel_event=cancel_event,
+                history_store=history_store,
+                ffmpeg_bin=ffmpeg_bin,
+            )
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._impl, name)

@@ -7,9 +7,10 @@ from pathlib import Path
 
 from api.ark import ArkClient
 from api.common import ApiResponse
+from api.minimax import MiniMaxClient, task_video_url
 from api.seedance import SeedanceClient
 from api.uguu import UguuClient
-from config import AppConfig, FIXED_DOUBAO_MODEL
+from config import AppConfig, FIXED_DOUBAO_MODEL, FIXED_MINIMAX_H3_MODEL
 from core.localization import analyze_video
 from utils.errors import ProviderError
 
@@ -162,6 +163,53 @@ class ProviderAdapterTests(unittest.TestCase):
         with self.assertRaises(ProviderError) as raised:
             client.wait_task("task-1", max_wait_seconds=0.001)
         self.assertEqual(raised.exception.error_code, "TASK_TIMEOUT")
+
+    def test_minimax_h3_uses_domestic_reference_payload_without_adaptive_ratio(self) -> None:
+        session = FakeSession([FakeResponse({"task_id": "h3-task-1", "request_id": "h3-request-1"})])
+        config = self.config.with_overrides(minimax_api_key="minimax-key")
+        client = MiniMaxClient(config, session=session)
+        task = client.create_task(
+            [
+                {"type": "text", "text": "transform the source"},
+                {
+                    "type": "video_url",
+                    "video_url": {"url": "https://uguu.se/source.mp4"},
+                    "role": "reference_video",
+                },
+            ],
+            duration=8,
+            resolution="2K",
+        )
+        payload = session.posts[0]["json"]
+        self.assertEqual(session.posts[0]["args"][0], "https://api.minimax.cn/v2/video_generation")
+        self.assertEqual(task.task_id, "h3-task-1")
+        self.assertEqual(payload["model"], FIXED_MINIMAX_H3_MODEL)
+        self.assertEqual(payload["duration"], 8)
+        self.assertEqual(payload["resolution"], "2K")
+        self.assertNotIn("ratio", payload)
+
+    def test_minimax_h3_query_returns_content_url(self) -> None:
+        session = FakeSession(
+            [
+                FakeResponse(
+                    {
+                        "task": {
+                            "task_id": "h3-task-1",
+                            "status": "succeeded",
+                            "content": {"url": "https://cdn.example/h3.mp4"},
+                        }
+                    }
+                )
+            ]
+        )
+        config = self.config.with_overrides(minimax_api_key="minimax-key")
+        client = MiniMaxClient(config, session=session, sleeper=lambda _seconds: None)
+        response = client.wait_task("h3-task-1", max_wait_seconds=1)
+        self.assertEqual(task_video_url(response.data), "https://cdn.example/h3.mp4")
+        self.assertEqual(
+            session.gets[0]["args"][0],
+            "https://api.minimax.cn/v2/query/video_generation/h3-task-1",
+        )
 
     def test_ark_auth_error_is_not_retried(self) -> None:
         session = FakeSession([FakeResponse({"error": {"code": "Unauthorized"}}, status_code=401)])

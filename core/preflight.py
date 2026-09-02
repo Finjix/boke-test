@@ -6,10 +6,12 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from api.minimax import MiniMaxClient
 from api.seedance import SeedanceClient
 from api.uguu import UguuClient
 from config import AppConfig, FIXED_DOUBAO_MODEL
 from core.models import JobSpec, PreflightCheck, PreflightReport
+from language_config import is_h3_native_language
 from utils.errors import PreflightError
 from utils.logger import JobLogger
 
@@ -130,6 +132,18 @@ def run_preflight(
     execute_remote_checks: bool = True,
 ) -> PreflightReport:
     clients = clients or {}
+    if "minimax_h3" in clients or "h3" in clients or (
+        not clients.get("seedance") and bool(config.minimax_api_key)
+    ):
+        return run_h3_preflight(
+            config,
+            spec,
+            job_dir=job_dir,
+            minimax_client=clients.get("minimax_h3") or clients.get("h3"),
+            uguu_client=clients.get("uguu"),
+            logger=logger,
+            execute_remote_checks=execute_remote_checks,
+        )
     runner = PreflightRunner(
         config,
         seedance_client=clients.get("seedance"),
@@ -140,6 +154,100 @@ def run_preflight(
         spec,
         job_dir=job_dir,
         execute_remote_checks=execute_remote_checks,
+    )
+
+
+def run_h3_preflight(
+    config: AppConfig,
+    spec: JobSpec,
+    *,
+    job_dir: Path | None = None,
+    minimax_client: Any | None = None,
+    uguu_client: Any | None = None,
+    logger: JobLogger | None = None,
+    execute_remote_checks: bool = True,
+) -> PreflightReport:
+    """Run non-generating checks for the active MiniMax H3 workflow."""
+
+    checks: list[PreflightCheck] = []
+
+    def add(name: str, passed: bool, detail: str, *, fatal: bool = True) -> None:
+        checks.append(PreflightCheck(name=name, passed=passed, detail=detail, fatal=fatal))
+        if logger:
+            logger.emit("INFO" if passed else "ERROR", f"Preflight: {name} - {detail}")
+
+    add(
+        "ffprobe",
+        _executable(config.ffprobe_bin),
+        str(config.ffprobe_bin),
+    )
+    add(
+        "MINIMAX_API_KEY",
+        bool(config.minimax_api_key),
+        "configured" if config.minimax_api_key else "missing",
+    )
+    add(
+        "MINIMAX_MODEL",
+        config.minimax_model == "MiniMax-H3",
+        config.minimax_model,
+    )
+    add(
+        "UGUU_UPLOAD_URL",
+        config.uguu_upload_url.startswith("https://"),
+        config.uguu_upload_url,
+    )
+    add(
+        "H3 target language",
+        is_h3_native_language(spec.target_language),
+        spec.target_language,
+    )
+
+    references = [*spec.reference_images, *spec.character_refs, *spec.scene_refs]
+    add(
+        "reference image count",
+        len(references) <= 9,
+        f"{len(references)} / 9",
+    )
+    for path in [spec.input_video, *references]:
+        path = Path(path)
+        exists = path.is_file()
+        add(f"input:{path.name}", exists, "available" if exists else "file does not exist")
+        if exists:
+            limit = 50 * 1024 * 1024 if path == Path(spec.input_video) else 30 * 1024 * 1024
+            within = path.stat().st_size <= limit
+            add(
+                f"size:{path.name}",
+                within,
+                "within H3 input limit" if within else f"larger than {limit // (1024 * 1024)} MiB",
+            )
+
+    work_dir = Path(job_dir or config.work_dir)
+    try:
+        work_dir.mkdir(parents=True, exist_ok=True)
+        probe_file = work_dir / ".preflight-write-test"
+        probe_file.write_text("ok", encoding="utf-8")
+        probe_file.unlink(missing_ok=True)
+        add("work directory", True, str(work_dir))
+    except OSError as exc:
+        add("work directory", False, str(exc))
+
+    if execute_remote_checks:
+        uploader = uguu_client or UguuClient(config, logger=logger)
+        try:
+            uploader.check_access(raw_dir=work_dir / "json" / "raw")
+            add("Uguu upload endpoint", True, "endpoint reachable")
+        except Exception as exc:  # noqa: BLE001 - surfaced as a check
+            add("Uguu upload endpoint", False, str(exc))
+        h3 = minimax_client or MiniMaxClient(config, logger=logger)
+        try:
+            h3.check_access(raw_dir=work_dir / "json" / "raw")
+            add("MiniMax H3 configuration", True, "configuration check passed")
+        except Exception as exc:  # noqa: BLE001 - surfaced as a check
+            add("MiniMax H3 configuration", False, str(exc))
+
+    return PreflightReport(
+        passed=all(check.passed for check in checks if check.fatal),
+        checks=checks,
     )
 
 

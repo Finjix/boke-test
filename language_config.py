@@ -45,6 +45,34 @@ TARGET_LOCALES: tuple[TargetLocale, ...] = (
 
 DEFAULT_TARGET_LOCALE_LABEL = "Gulf (Arabic)"
 
+# H3's documented native dialogue-language set. Region and locale are still
+# passed separately as cultural prompt constraints; the model does not promise
+# a particular national dialect.
+H3_NATIVE_LANGUAGE_CODES = frozenset(
+    {
+        "ar",
+        "zh",
+        "en",
+        "fr",
+        "de",
+        "it",
+        "ja",
+        "ko",
+        "pt",
+        "ru",
+        "es",
+    }
+)
+
+
+def is_h3_native_language(language_code: str) -> bool:
+    return language_code.strip().casefold() in H3_NATIVE_LANGUAGE_CODES
+
+
+H3_TARGET_LOCALES: tuple[TargetLocale, ...] = tuple(
+    item for item in TARGET_LOCALES if is_h3_native_language(item.language_code)
+)
+
 
 def locale_from_label(label: str) -> TargetLocale | None:
     for locale in TARGET_LOCALES:

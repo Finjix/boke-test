@@ -17,6 +17,9 @@ EDITABLE_SETTING_NAMES = (
     "ark_api_key",
     "seedance_model_id",
 )
+H3_SETTING_NAMES = (
+    "minimax_api_key",
+)
 PREFERENCE_NAMES = (
     "auto_continue_to_seedance",
 )
@@ -40,11 +43,15 @@ class SettingsStore:
         values = payload.get("values", payload) if isinstance(payload, dict) else {}
         if not isinstance(values, dict):
             return {}
-        return {
+        result = {
             name: value
             for name in EDITABLE_SETTING_NAMES
             if isinstance(value := values.get(name), str)
         }
+        for name in H3_SETTING_NAMES:
+            if isinstance(value := values.get(name), str):
+                result[name] = value
+        return result
 
     def load_preferences(self) -> dict[str, bool]:
         """Load non-secret UI preferences with safe defaults."""
@@ -79,6 +86,12 @@ class SettingsStore:
             name: str(values.get(name, "")).strip()
             for name in EDITABLE_SETTING_NAMES
         }
+        old_values = self.load()
+        for name in H3_SETTING_NAMES:
+            if name in values or name in old_values:
+                normalized[name] = str(
+                    values.get(name, old_values.get(name, ""))
+                ).strip()
         old_preferences = self.load_preferences()
         normalized_preferences = {
             name: bool(
