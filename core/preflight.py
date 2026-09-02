@@ -6,10 +6,9 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from api.seed_audio import SeedAudioClient
 from api.seedance import SeedanceClient
 from api.uguu import UguuClient
-from config import AppConfig, FIXED_DOUBAO_MODEL, FIXED_SEED_AUDIO_MODEL
+from config import AppConfig, FIXED_DOUBAO_MODEL
 from core.models import JobSpec, PreflightCheck, PreflightReport
 from utils.errors import PreflightError
 from utils.logger import JobLogger
@@ -25,13 +24,11 @@ class PreflightRunner:
         self,
         config: AppConfig,
         *,
-        seed_audio_client: Any | None = None,
         seedance_client: Any | None = None,
         uguu_client: Any | None = None,
         logger: JobLogger | None = None,
     ):
         self.config = config
-        self.seed_audio_client = seed_audio_client or SeedAudioClient(config, logger=logger)
         self.seedance_client = seedance_client or SeedanceClient(config, logger=logger)
         self.uguu_client = uguu_client or UguuClient(config, logger=logger)
         self.logger = logger
@@ -52,26 +49,17 @@ class PreflightRunner:
                 level = "info" if passed else "error"
                 self.logger.emit(level, f"Preflight: {name} - {detail}")
 
-        for name, executable in (
-            ("ffmpeg", self.config.ffmpeg_bin),
-            ("ffprobe", self.config.ffprobe_bin),
-        ):
-            passed = _executable(executable)
-            add(name, passed, executable if passed else f"not found: {executable}")
+        executable = self.config.ffprobe_bin
+        passed = _executable(executable)
+        add("ffprobe", passed, executable if passed else f"not found: {executable}")
 
         for name, value in (
             ("ARK_API_KEY", self.config.ark_api_key),
-            ("SEED_AUDIO_API_KEY", self.config.seed_audio_api_key),
             ("SEEDANCE_MODEL_ID", self.config.seedance_model_id),
         ):
             add(name, bool(value), "configured" if value else "missing")
 
         add("DOUBAO_MODEL", self.config.doubao_model == FIXED_DOUBAO_MODEL, self.config.doubao_model)
-        add(
-            "SEED_AUDIO_MODEL",
-            self.config.seed_audio_model == FIXED_SEED_AUDIO_MODEL,
-            self.config.seed_audio_model,
-        )
         add(
             "UGUU_UPLOAD_URL",
             self.config.uguu_upload_url.startswith("https://"),
@@ -144,7 +132,6 @@ def run_preflight(
     clients = clients or {}
     runner = PreflightRunner(
         config,
-        seed_audio_client=clients.get("seed_audio"),
         seedance_client=clients.get("seedance"),
         uguu_client=clients.get("uguu"),
         logger=logger,

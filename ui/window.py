@@ -228,9 +228,7 @@ class VideoLocalizerWindow(tk.Tk):
         stage = str(event.get("stage", ""))
         stage_labels = {
             PipelineStage.ANALYZING.value: "分析视频",
-            PipelineStage.GENERATING_AUDIO.value: "生成本地化音频",
-            PipelineStage.GENERATING_VIDEO.value: "生成本地化视频",
-            PipelineStage.MUXING.value: "最终合成",
+            PipelineStage.GENERATING_VIDEO.value: "生成本地化视频（含声音与口型）",
             PipelineStage.COMPLETED.value: "已完成",
             PipelineStage.FAILED.value: "失败",
         }

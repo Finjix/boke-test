@@ -22,7 +22,6 @@ from video_config import SEEDANCE_MAX_DURATION, SEEDANCE_TASK_TIMEOUT
 
 
 FIXED_DOUBAO_MODEL = "doubao-seed-2-0-lite-260428"
-FIXED_SEED_AUDIO_MODEL = "seed-audio-1.0"
 
 
 def _text(env: Mapping[str, str], name: str, default: str = "") -> str:
@@ -87,10 +86,6 @@ class AppConfig:
     seedance_max_duration: int = SEEDANCE_MAX_DURATION
     seedance_task_timeout: int = SEEDANCE_TASK_TIMEOUT
 
-    seed_audio_api_key: str = ""
-    seed_audio_endpoint: str = "https://openspeech.bytedance.com/api/v3/tts/create"
-    seed_audio_model: str = FIXED_SEED_AUDIO_MODEL
-
     uguu_upload_url: str = "https://uguu.se/upload"
     uguu_max_file_mib: int = 128
     uguu_expire_hours: int = 3
@@ -99,7 +94,6 @@ class AppConfig:
     poll_interval: float = 10.0
     max_retries: int = 3
     work_dir: Path = Path("work")
-    ffmpeg_bin: str = "ffmpeg"
     ffprobe_bin: str = "ffprobe"
 
     # Secret fields are still accessible to runtime adapters, but do not appear
@@ -112,8 +106,6 @@ class AppConfig:
             f"seedance_model_id={self.seedance_model_id!r}, "
             f"seedance_max_duration={self.seedance_max_duration!r}, "
             f"seedance_task_timeout={self.seedance_task_timeout!r}, "
-            f"seed_audio_endpoint={self.seed_audio_endpoint!r}, "
-            f"seed_audio_model={self.seed_audio_model!r}, "
             f"uguu_upload_url={self.uguu_upload_url!r}, "
             f"work_dir={str(self.work_dir)!r})"
         )
@@ -141,12 +133,6 @@ class AppConfig:
         else:
             source = env
 
-        seed_audio_model = _text(source, "SEED_AUDIO_MODEL", FIXED_SEED_AUDIO_MODEL)
-        if seed_audio_model != FIXED_SEED_AUDIO_MODEL:
-            raise ConfigurationError(
-                f"SEED_AUDIO_MODEL is fixed to {FIXED_SEED_AUDIO_MODEL}"
-            )
-
         config = cls(
             ark_api_key=_text(source, "ARK_API_KEY"),
             ark_base_url=_text(
@@ -158,13 +144,6 @@ class AppConfig:
             seedance_model_id=_text(source, "SEEDANCE_MODEL_ID"),
             seedance_max_duration=_int(source, "SEEDANCE_MAX_DURATION", SEEDANCE_MAX_DURATION),
             seedance_task_timeout=_int(source, "SEEDANCE_TASK_TIMEOUT", SEEDANCE_TASK_TIMEOUT),
-            seed_audio_api_key=_text(source, "SEED_AUDIO_API_KEY"),
-            seed_audio_endpoint=_text(
-                source,
-                "SEED_AUDIO_ENDPOINT",
-                "https://openspeech.bytedance.com/api/v3/tts/create",
-            ).rstrip("/"),
-            seed_audio_model=seed_audio_model,
             uguu_upload_url=_text(
                 source,
                 "UGUU_UPLOAD_URL",
@@ -176,13 +155,6 @@ class AppConfig:
             poll_interval=_float(source, "POLL_INTERVAL", 10.0),
             max_retries=_int(source, "MAX_RETRIES", 3),
             work_dir=_path_from_env(source, "WORK_DIR", Path("work"), root),
-            ffmpeg_bin=_tool_from_env(
-                source,
-                "FFMPEG_BIN",
-                "ffmpeg",
-                root,
-                "tools/ffmpeg/bin/ffmpeg.exe",
-            ),
             ffprobe_bin=_tool_from_env(
                 source,
                 "FFPROBE_BIN",
@@ -197,12 +169,8 @@ class AppConfig:
     def validate_values(self) -> None:
         if self.doubao_model != FIXED_DOUBAO_MODEL:
             raise ConfigurationError(f"DOUBAO_MODEL is fixed to {FIXED_DOUBAO_MODEL}")
-        if self.seed_audio_model != FIXED_SEED_AUDIO_MODEL:
-            raise ConfigurationError(f"SEED_AUDIO_MODEL is fixed to {FIXED_SEED_AUDIO_MODEL}")
         if not self.ark_base_url.startswith(("http://", "https://")):
             raise ConfigurationError("ARK_BASE_URL must be an HTTP(S) URL")
-        if not self.seed_audio_endpoint.startswith(("http://", "https://")):
-            raise ConfigurationError("SEED_AUDIO_ENDPOINT must be an HTTP(S) URL")
         if not self.uguu_upload_url.startswith("https://"):
             raise ConfigurationError("UGUU_UPLOAD_URL must be an HTTPS URL")
         if self.seedance_max_duration <= 0:
@@ -233,7 +201,6 @@ class AppConfig:
         missing: list[str] = []
         for name, value in (
             ("ARK_API_KEY", self.ark_api_key),
-            ("SEED_AUDIO_API_KEY", self.seed_audio_api_key),
             ("SEEDANCE_MODEL_ID", self.seedance_model_id),
         ):
             if not value:

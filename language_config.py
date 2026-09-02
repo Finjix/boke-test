@@ -17,6 +17,7 @@ class TargetLocale:
 TARGET_LOCALES: tuple[TargetLocale, ...] = (
     TargetLocale("English", "en", "United States", "en-US", "United States (English)"),
     TargetLocale("English", "en", "United Kingdom", "en-GB", "United Kingdom (English)"),
+    TargetLocale("Chinese", "zh", "China", "zh-CN", "China (Chinese)"),
     TargetLocale("Spanish", "es", "Spain", "es-ES", "Spain (Spanish)"),
     TargetLocale("Spanish", "es", "Latin America", "es-419", "Latin America (Spanish)"),
     TargetLocale("Portuguese", "pt", "Brazil", "pt-BR", "Brazil (Portuguese)"),

@@ -1,4 +1,4 @@
-"""Video-analysis contract and validation for the v2 localization pipeline."""
+"""Doubao video-understanding contract for the v3 localization pipeline."""
 
 from __future__ import annotations
 
@@ -7,13 +7,13 @@ import math
 from pathlib import Path
 from typing import Any
 
-from core.models import LocalizationDialogue, LocalizationScript
+from core.models import LocalizationDialogue, LocalizationPackage
 from utils.errors import ValidationError
 from utils.json_parser import parse_strict_json
 from utils.logger import JobLogger
 
 
-ANALYSIS_PROMPT_VERSION = "v2"
+ANALYSIS_PROMPT_VERSION = "v3"
 ANALYSIS_CORRECTION_ATTEMPTS = 2
 
 
@@ -23,16 +23,43 @@ def _https(value: str, label: str) -> str:
     return value
 
 
-def localization_script_schema() -> dict[str, Any]:
-    """Return the JSON contract embedded in the analysis prompt."""
+def localization_package_schema() -> dict[str, Any]:
+    """Return the closed top-level JSON contract embedded in the prompt."""
 
+    planning_object = {
+        "type": "object",
+        "additionalProperties": True,
+    }
     return {
         "type": "object",
         "additionalProperties": False,
-        "required": ["source_language", "target_language", "speakers", "dialogues"],
+        "required": [
+            "source",
+            "target",
+            "video_analysis",
+            "speakers",
+            "dialogues",
+            "visual_localization",
+            "cultural_requirements",
+        ],
         "properties": {
-            "source_language": {"type": "string"},
-            "target_language": {"type": "string"},
+            "source": {
+                "type": "object",
+                "required": ["language"],
+                "additionalProperties": True,
+                "properties": {"language": {"type": "string"}},
+            },
+            "target": {
+                "type": "object",
+                "required": ["language", "region", "locale"],
+                "additionalProperties": True,
+                "properties": {
+                    "language": {"type": "string"},
+                    "region": {"type": "string"},
+                    "locale": {"type": "string"},
+                },
+            },
+            "video_analysis": planning_object,
             "speakers": {
                 "type": "array",
                 "items": {
@@ -66,6 +93,11 @@ def localization_script_schema() -> dict[str, Any]:
                     },
                 },
             },
+            "visual_localization": planning_object,
+            "cultural_requirements": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
         },
     }
 
@@ -74,33 +106,41 @@ def build_video_analysis_messages(
     source_video_url: str,
     *,
     target_language: str,
+    target_region: str,
     target_locale: str,
     correction_error: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Build one multimodal Ark request for analysis and translation."""
+    """Build one multimodal Ark request for planning and translation."""
 
     source_video_url = _https(source_video_url, "source video")
-    schema = json.dumps(localization_script_schema(), ensure_ascii=False, separators=(",", ":"))
+    schema = json.dumps(
+        localization_package_schema(),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
     system = (
-        "Analyze the complete video using both visual and audio information.\n"
+        "Analyze the complete video using both visual and audio information where available.\n"
+        "Identify the theme, story structure, shot structure, scene environment, character "
+        "relationships, product information and core creative idea.\n"
         "Identify every speaking character and maintain a stable speaker ID for the same "
         "character throughout the video.\n"
-        "Determine which character speaks each dialogue line using both voice information "
-        "and visible speaking behavior.\n"
-        "Transcribe the original dialogue and translate it directly into the requested "
-        "target language.\n"
-        "Preserve the original meaning, tone, conversational relationship, and approximate "
-        "dialogue duration.\n"
-        "Return dialogue start and end timestamps in integer milliseconds.\n"
-        "Do not describe voice timbre, music, ambience, or sound effects.\n"
+        "Determine which character speaks each dialogue line using visible speaking behavior "
+        "and audio context.\n"
+        "Transcribe the original dialogue and translate it directly into the requested target "
+        "language while preserving meaning, tone, relationships and approximate timing.\n"
+        "Create a practical visual localization plan for characters, wardrobe, environment, "
+        "architecture and props, plus concrete cultural requirements for the target market.\n"
+        "Return dialogue start and end timestamps as integer milliseconds.\n"
+        "Do not describe voice timbre, music, ambience or sound effects; Seedance will generate "
+        "the complete final audio scene.\n"
         "Use only the following JSON object shape and return valid JSON only:\n"
         f"{schema}"
     )
     user_text = (
-        f"Translate the dialogue into language code {target_language} for locale {target_locale}. "
-        "Detect the source language automatically. Keep dialogues sorted by start_ms. "
-        "If a character is an off-screen narrator, use a stable speaker ID and visual_hint "
-        "of 'off-screen narrator'."
+        f"Create a localization package for region {target_region}, language code "
+        f"{target_language}, locale {target_locale}. Detect the source language automatically. "
+        "Keep dialogues sorted by start_ms. If a character is an off-screen narrator, use a "
+        "stable speaker ID and visual_hint of 'off-screen narrator'."
     )
     if correction_error:
         user_text += (
@@ -130,30 +170,46 @@ def _overlap_is_abnormally_large(
     return overlap > shorter_duration * 0.5
 
 
-def validate_localization_script(
-    value: LocalizationScript | dict[str, Any],
+def validate_localization_package(
+    value: LocalizationPackage | dict[str, Any],
     *,
     target_language: str,
+    target_region: str,
+    target_locale: str,
     duration_seconds: float,
-) -> LocalizationScript:
+) -> LocalizationPackage:
     """Validate the model result against the job target and source duration."""
 
     try:
-        script = value if isinstance(value, LocalizationScript) else LocalizationScript.model_validate(value)
+        package = (
+            value
+            if isinstance(value, LocalizationPackage)
+            else LocalizationPackage.model_validate(value)
+        )
     except Exception as exc:  # Pydantic's detailed error is not user-facing
-        raise ValidationError(f"invalid localization script: {exc}") from exc
+        raise ValidationError(f"invalid localization package: {exc}") from exc
 
-    if script.target_language.casefold() != target_language.casefold():
+    if package.target_language.casefold() != target_language.casefold():
         raise ValidationError(
-            f"analysis target_language does not match requested language: "
-            f"{script.target_language} != {target_language}"
+            "analysis target language does not match requested language: "
+            f"{package.target_language} != {target_language}"
+        )
+    if package.target_region.casefold() != target_region.casefold():
+        raise ValidationError(
+            "analysis target region does not match requested region: "
+            f"{package.target_region} != {target_region}"
+        )
+    if package.target_locale.casefold() != target_locale.casefold():
+        raise ValidationError(
+            "analysis target locale does not match requested locale: "
+            f"{package.target_locale} != {target_locale}"
         )
     if not math.isfinite(duration_seconds) or duration_seconds <= 0:
         raise ValidationError("source duration must be positive and finite")
     duration_ms = duration_seconds * 1000
     previous: LocalizationDialogue | None = None
     seen: set[tuple[str, int, int, str, str]] = set()
-    for dialogue in script.dialogues:
+    for dialogue in package.dialogues:
         if dialogue.end_ms > duration_ms:
             raise ValidationError(
                 f"dialogue {dialogue.speaker_id} ends after source video duration"
@@ -166,7 +222,7 @@ def validate_localization_script(
             dialogue.target_text,
         )
         if key in seen:
-            raise ValidationError("localization script contains duplicate dialogue")
+            raise ValidationError("localization package contains duplicate dialogue")
         seen.add(key)
         if previous is not None:
             if (dialogue.start_ms, dialogue.end_ms) < (previous.start_ms, previous.end_ms):
@@ -174,7 +230,29 @@ def validate_localization_script(
             if _overlap_is_abnormally_large(previous, dialogue):
                 raise ValidationError("dialogues contain an abnormally large overlap")
         previous = dialogue
-    return script
+    return package
+
+
+def validate_localization_script(
+    value: LocalizationPackage | dict[str, Any],
+    *,
+    target_language: str,
+    duration_seconds: float,
+) -> LocalizationPackage:
+    """Compatibility wrapper for callers of the pre-package function name."""
+
+    package = (
+        value
+        if isinstance(value, LocalizationPackage)
+        else LocalizationPackage.model_validate(value)
+    )
+    return validate_localization_package(
+        package,
+        target_language=target_language,
+        target_region=package.target_region,
+        target_locale=package.target_locale,
+        duration_seconds=duration_seconds,
+    )
 
 
 def analyze_video(
@@ -182,12 +260,13 @@ def analyze_video(
     source_video_url: str,
     *,
     target_language: str,
+    target_region: str,
     target_locale: str,
     duration_seconds: float,
     raw_dir: Path | None = None,
     logger: JobLogger | None = None,
-) -> LocalizationScript:
-    """Call the configured model once, with one same-model correction attempt."""
+) -> LocalizationPackage:
+    """Call Doubao once, with one same-model correction attempt."""
 
     last_error: Exception | None = None
     correction_error: str | None = None
@@ -195,6 +274,7 @@ def analyze_video(
         messages = build_video_analysis_messages(
             source_video_url,
             target_language=target_language,
+            target_region=target_region,
             target_locale=target_locale,
             correction_error=correction_error,
         )
@@ -206,10 +286,12 @@ def analyze_video(
                 response_format={"type": "json_object"},
             )
             content = client.extract_text(response)
-            value = parse_strict_json(content, description="video analysis response")
-            return validate_localization_script(
+            value = parse_strict_json(content, description="video localization package")
+            return validate_localization_package(
                 value,
                 target_language=target_language,
+                target_region=target_region,
+                target_locale=target_locale,
                 duration_seconds=duration_seconds,
             )
         except ValidationError as exc:
@@ -217,7 +299,7 @@ def analyze_video(
             correction_error = str(exc)
             if logger is not None:
                 logger.warning(
-                    "video analysis response failed contract validation",
+                    "video localization package failed contract validation",
                     attempt=attempt,
                     error=str(exc),
                 )

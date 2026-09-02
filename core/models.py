@@ -14,9 +14,7 @@ class PipelineStage(str, Enum):
     """Public pipeline stages shown by the desktop application."""
 
     ANALYZING = "analyzing"
-    GENERATING_AUDIO = "generating_audio"
     GENERATING_VIDEO = "generating_video"
-    MUXING = "muxing"
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -67,22 +65,45 @@ class LocalizationDialogue(StrictModel):
         return self
 
 
-class LocalizationScript(StrictModel):
-    source_language: str
-    target_language: str
+class LocalizationPackage(StrictModel):
+    """The complete planning contract passed from Doubao to Seedance."""
+
+    source: dict[str, Any]
+    target: dict[str, Any]
+    video_analysis: dict[str, Any]
     speakers: list[LocalizationSpeaker]
     dialogues: list[LocalizationDialogue]
+    visual_localization: dict[str, Any]
+    cultural_requirements: list[str]
 
-    @field_validator("source_language", "target_language")
+    @field_validator("cultural_requirements")
     @classmethod
-    def non_empty_language(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("languages cannot be empty")
-        return value
+    def non_empty_cultural_requirements(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for item in value:
+            item = item.strip()
+            if not item:
+                raise ValueError("cultural requirements cannot contain empty text")
+            normalized.append(item)
+        return normalized
+
+    @staticmethod
+    def _required_text(container: dict[str, Any], key: str, label: str) -> str:
+        value = container.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{label}.{key} must be non-empty text")
+        return value.strip()
 
     @model_validator(mode="after")
-    def validate_speaker_references(self) -> "LocalizationScript":
+    def validate_target_contract(self) -> "LocalizationPackage":
+        self._required_text(self.source, "language", "source")
+        self._required_text(self.target, "language", "target")
+        self._required_text(self.target, "region", "target")
+        self._required_text(self.target, "locale", "target")
+        return self
+
+    @model_validator(mode="after")
+    def validate_speaker_references(self) -> "LocalizationPackage":
         speaker_ids = [speaker.id for speaker in self.speakers]
         if len(speaker_ids) != len(set(speaker_ids)):
             raise ValueError("speaker IDs must be unique")
@@ -93,7 +114,7 @@ class LocalizationScript(StrictModel):
         return self
 
     @model_validator(mode="after")
-    def validate_dialogue_timeline(self) -> "LocalizationScript":
+    def validate_dialogue_timeline(self) -> "LocalizationPackage":
         seen: set[tuple[str, int, int, str, str]] = set()
         for index, dialogue in enumerate(self.dialogues):
             key = (
@@ -128,6 +149,27 @@ class LocalizationScript(StrictModel):
                 if overlap > shorter_duration * 0.5:
                     raise ValueError("dialogues contain an abnormally large overlap")
         return self
+
+    @property
+    def source_language(self) -> str:
+        return str(self.source["language"])
+
+    @property
+    def target_language(self) -> str:
+        return str(self.target["language"])
+
+    @property
+    def target_region(self) -> str:
+        return str(self.target["region"])
+
+    @property
+    def target_locale(self) -> str:
+        return str(self.target["locale"])
+
+
+# Kept as a type alias for callers that used the old name; the runtime contract
+# is now the package above and old checkpoints are intentionally incompatible.
+LocalizationScript = LocalizationPackage
 
 
 class JobSpec(StrictModel):
@@ -177,7 +219,7 @@ class UploadedAsset(StrictModel):
 class JobContext(StrictModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
-    pipeline_version: int = 2
+    pipeline_version: int = 3
     job_id: str
     job_dir: Path
     spec: JobSpec

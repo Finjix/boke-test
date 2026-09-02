@@ -30,7 +30,6 @@ class PreflightTests(unittest.TestCase):
             source = Path(directory) / "input.mp4"
             source.write_bytes(b"video")
             config = AppConfig(
-                ffmpeg_bin="definitely-not-installed",
                 ffprobe_bin="also-not-installed",
                 work_dir=Path(directory) / "work",
             )
@@ -38,7 +37,6 @@ class PreflightTests(unittest.TestCase):
                 config,
                 _spec(source),
                 clients={
-                    "seed_audio": FakeProvider(),
                     "seedance": FakeProvider(),
                     "uguu": FakeProvider(),
                 },
@@ -46,11 +44,11 @@ class PreflightTests(unittest.TestCase):
             )
             self.assertFalse(report.passed)
             names = {check.name for check in report.checks if not check.passed}
-            self.assertIn("ffmpeg", names)
             self.assertIn("ffprobe", names)
             self.assertIn("ARK_API_KEY", names)
-            self.assertNotIn("mediakit-cli", names)
-            self.assertNotIn("MediaKit API Key", names)
+            self.assertIn("SEEDANCE_MODEL_ID", names)
+            self.assertNotIn("ffmpeg", {check.name for check in report.checks})
+            self.assertNotIn("SEED_AUDIO_API_KEY", {check.name for check in report.checks})
 
     def test_static_preflight_can_pass_without_model_generation_calls(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -58,9 +56,7 @@ class PreflightTests(unittest.TestCase):
             source.write_bytes(b"video")
             config = AppConfig(
                 ark_api_key="ark",
-                seed_audio_api_key="audio",
                 seedance_model_id="ep-test",
-                ffmpeg_bin=sys.executable,
                 ffprobe_bin=sys.executable,
                 work_dir=Path(directory) / "work",
             )
@@ -68,14 +64,10 @@ class PreflightTests(unittest.TestCase):
                 config,
                 _spec(source),
                 clients={
-                    "seed_audio": FakeProvider(),
                     "seedance": FakeProvider(),
                     "uguu": FakeProvider(),
                 },
                 execute_remote_checks=False,
             )
             self.assertTrue(report.passed)
-            self.assertIn(
-                "DOUBAO_MODEL",
-                {check.name for check in report.checks},
-            )
+            self.assertIn("DOUBAO_MODEL", {check.name for check in report.checks})

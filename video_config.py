@@ -1,11 +1,10 @@
-"""Video and audio processing limits for the localization pipeline."""
+"""Video-generation limits for the localization pipeline."""
 
 from __future__ import annotations
 
 from utils.errors import UnsupportedDurationError, ValidationError
 
 
-AUDIO_SAMPLE_RATE = 48_000
 # This is a configurable account capability, not a public-model guarantee.
 SEEDANCE_MAX_DURATION = 30
 SEEDANCE_TASK_TIMEOUT = 7200

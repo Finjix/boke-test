@@ -1,1 +1,1 @@
-"""FFmpeg, ffprobe, frame and download helpers."""
+"""ffprobe metadata and download helpers used by the localization pipeline."""

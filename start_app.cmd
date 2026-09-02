@@ -6,7 +6,6 @@ set "BOOTSTRAP_SCRIPT=%~dp0tools\install_dependencies.ps1"
 set "POWERSHELL=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
 set "PROJECT_PYTHON=%~dp0runtime\python3.13.15\python.exe"
 set "PROJECT_READY=%~dp0runtime\python3.13.15\.project-ready"
-set "FFMPEG_BIN=%~dp0tools\ffmpeg\bin\ffmpeg.exe"
 set "FFPROBE_BIN=%~dp0tools\ffmpeg\bin\ffprobe.exe"
 
 if not exist "%BOOTSTRAP_SCRIPT%" (
@@ -24,12 +23,11 @@ if not exist "%POWERSHELL%" (
 
 if not exist "%PROJECT_READY%" goto bootstrap
 if not exist "%PROJECT_PYTHON%" goto bootstrap
-if not exist "%FFMPEG_BIN%" goto bootstrap
 if not exist "%FFPROBE_BIN%" goto bootstrap
 goto run
 
 :bootstrap
-echo Preparing project-local Python, FFmpeg and Python dependencies...
+echo Preparing project-local Python, ffprobe and Python dependencies...
 "%POWERSHELL%" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%BOOTSTRAP_SCRIPT%"
 if errorlevel 1 (
     echo.

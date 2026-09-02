@@ -1,5 +1,5 @@
 param(
-    [switch]$SkipFfmpeg
+    [switch]$SkipMediaTools
 )
 
 $ErrorActionPreference = "Stop"
@@ -92,16 +92,15 @@ if ($LASTEXITCODE -ne 0) {
     throw "Project-local Python dependency installation failed."
 }
 
-if (-not $SkipFfmpeg) {
+if (-not $SkipMediaTools) {
     $FfmpegArchive = Join-Path $DownloadRoot "ffmpeg-release-essentials.zip"
     Get-And-VerifyFile `
         -Url "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" `
         -Destination $FfmpegArchive `
         -Sha256Url "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip.sha256"
 
-    $FfmpegBin = Join-Path $ProjectRoot "tools\ffmpeg\bin\ffmpeg.exe"
     $FfprobeBin = Join-Path $ProjectRoot "tools\ffmpeg\bin\ffprobe.exe"
-    if (-not (Test-Path -LiteralPath $FfmpegBin) -or -not (Test-Path -LiteralPath $FfprobeBin)) {
+    if (-not (Test-Path -LiteralPath $FfprobeBin)) {
         New-Item -ItemType Directory -Force -Path (Join-Path $ProjectRoot "tools\ffmpeg") | Out-Null
         tar.exe -xf $FfmpegArchive -C (Join-Path $ProjectRoot "tools\ffmpeg") --strip-components=1
         if ($LASTEXITCODE -ne 0) {
@@ -110,16 +109,13 @@ if (-not $SkipFfmpeg) {
     }
 }
 
-if (-not $SkipFfmpeg) {
-    if (-not (Test-Path -LiteralPath (Join-Path $ProjectRoot "tools\ffmpeg\bin\ffmpeg.exe"))) {
-        throw "FFmpeg was not installed."
-    }
+if (-not $SkipMediaTools) {
     if (-not (Test-Path -LiteralPath (Join-Path $ProjectRoot "tools\ffmpeg\bin\ffprobe.exe"))) {
-        throw "FFprobe was not installed."
+        throw "ffprobe was not installed."
     }
 }
 
-if (-not $SkipFfmpeg) {
+if (-not $SkipMediaTools) {
     $RequirementsHash = Get-Sha256 -Path (Join-Path $ProjectRoot "requirements.txt")
     $MarkerText = "Python=3.13.15`r`nRequirementsSHA256=$RequirementsHash`r`n"
     [IO.File]::WriteAllText($ReadyMarker, $MarkerText, [Text.UTF8Encoding]::new($false))
