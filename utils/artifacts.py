@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from uuid import uuid4
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -14,12 +15,23 @@ def _safe_name(value: str) -> str:
 
 
 def write_json(path: Path, value: Any) -> Path:
+    """Write JSON atomically so a process exit cannot leave partial JSON."""
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(value, ensure_ascii=False, indent=2, default=str),
-        encoding="utf-8",
-    )
-    return path
+    temporary_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        temporary_path.write_text(
+            json.dumps(value, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
+        temporary_path.replace(path)
+    except OSError:
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    return Path(path)
 
 
 def read_json(path: Path) -> Any:

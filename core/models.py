@@ -14,6 +14,7 @@ class PipelineStage(str, Enum):
     """Public pipeline stages shown by the desktop application."""
 
     ANALYZING = "analyzing"
+    WAITING_FOR_APPROVAL = "waiting_for_approval"
     GENERATING_VIDEO = "generating_video"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -21,6 +22,99 @@ class PipelineStage(str, Enum):
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class ExecutionMode(str, Enum):
+    """Whether the pipeline pauses after the Doubao node."""
+
+    MANUAL = "manual"
+    AUTO = "auto"
+
+
+class ApprovalStatus(str, Enum):
+    NOT_REQUIRED = "not_required"
+    PENDING = "pending"
+    APPROVED = "approved"
+
+
+class NodeExecutionStatus(str, Enum):
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class ProviderCall(StrictModel):
+    request_id: str | None = None
+    status: NodeExecutionStatus
+    started_at: str
+    finished_at: str | None = None
+    raw_response_path: str | None = None
+    error: dict[str, Any] | None = None
+
+
+class NodeExecution(StrictModel):
+    """One logical execution of a pipeline node.
+
+    A Doubao execution can contain two provider calls because the existing
+    same-model contract correction is retained. Each Seedance retry is a new
+    node execution and therefore remains auditable.
+    """
+
+    node: str
+    attempt: int
+    status: NodeExecutionStatus
+    started_at: str
+    finished_at: str | None = None
+    request_ids: list[str] = Field(default_factory=list)
+    task_id: str | None = None
+    input_artifacts: list[str] = Field(default_factory=list)
+    output_artifacts: list[str] = Field(default_factory=list)
+    provider_calls: list[ProviderCall] = Field(default_factory=list)
+    error: dict[str, Any] | None = None
+
+
+class PipelineResult(StrictModel):
+    """Result returned by each orchestration command."""
+
+    job_id: str
+    stage: PipelineStage
+    output_path: Path | None = None
+    package_path: Path | None = None
+    action_required: str | None = None
+
+    # Keep the completed-result ergonomics of the old ``Path`` return value
+    # for integrations that only inspect the output file.
+    @property
+    def name(self) -> str:
+        if self.output_path is None:
+            raise AttributeError("pipeline result has no output path")
+        return self.output_path.name
+
+    def is_file(self) -> bool:
+        return bool(self.output_path and self.output_path.is_file())
+
+    def __fspath__(self) -> str:
+        if self.output_path is None:
+            raise TypeError("pipeline result has no output path")
+        return str(self.output_path)
+
+
+class HistoryEntry(StrictModel):
+    """A local, provider-free summary shown in the execution history."""
+
+    job_id: str
+    job_dir: Path
+    source_name: str = ""
+    target_locale: str = ""
+    stage: str = "unknown"
+    status: str = "unknown"
+    created_at: str = ""
+    updated_at: str = ""
+    latest_node: str | None = None
+    latest_attempt: int | None = None
+    last_error: str | None = None
+    output_path: Path | None = None
+    compatible: bool = True
 
 
 class LocalizationSpeaker(StrictModel):
@@ -219,15 +313,21 @@ class UploadedAsset(StrictModel):
 class JobContext(StrictModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
-    pipeline_version: int = 3
+    pipeline_version: int = 4
     job_id: str
     job_dir: Path
     spec: JobSpec
+    execution_mode: ExecutionMode = ExecutionMode.MANUAL
+    approval_status: ApprovalStatus = ApprovalStatus.NOT_REQUIRED
+    approved_at: str | None = None
+    created_at: str
+    updated_at: str
     stage: PipelineStage = PipelineStage.ANALYZING
     progress: int = 0
     task_ids: dict[str, str] = Field(default_factory=dict)
     request_ids: dict[str, str] = Field(default_factory=dict)
     retry_counts: dict[str, int] = Field(default_factory=dict)
+    node_executions: list[NodeExecution] = Field(default_factory=list)
     artifacts: dict[str, str] = Field(default_factory=dict)
     cache_key: dict[str, str] = Field(default_factory=dict)
     metrics: dict[str, Any] = Field(default_factory=dict)

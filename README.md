@@ -1,6 +1,6 @@
 # AI 多语言视频本地化工具
 
-这是一个 Python/Tkinter 桌面工具：Doubao Seed 2.0 Lite 负责视频理解、角色对应、对白时间轴、翻译和目标文化规划，Seedance 负责生成本地化画面、目标语言对白、口型、BGM、环境声和音效，并直接输出完整有声视频。
+这是一个 Python/Tkinter 桌面工具：Doubao Seed 2.0 Lite 负责视频理解、角色对应、对白时间轴、翻译和目标文化规划，Seedance 负责生成本地化画面、目标语言对白、口型、BGM、环境声和音效，并输出完整有声视频。任务支持在 Doubao 节点后暂停审阅，所有节点结果和执行尝试都会持久化到本地。
 
 ## 安装
 
@@ -25,10 +25,13 @@
 ## 处理链路
 
 1. `analyzing`：ffprobe 检查视频并记录时长，将原视频和参考素材上传为临时 HTTPS Uguu URL；Doubao 一次完成视频理解、角色映射、对白时间轴、目标语言翻译和文化本地化规划，保存为 `json/localization_package.json`。
-2. `generating_video`：根据 Localization Package 动态生成 Seedance Prompt，使用原视频和参考素材生成包含目标语言对白、BGM、环境声、音效和口型同步的完整有声视频。
-3. 输出直接保存为 `output/final_<target_locale>.mp4`，不执行独立配音、音轨替换、混音、二次变速或二次 lip-sync。
+2. `waiting_for_approval`（默认）：窗口只展示 Doubao 的结构化 JSON，用户确认无误后才允许进入 Seedance。设置中的“自动进入 Seedance”开关可以恢复一键直跑。
+3. `generating_video`：根据 Localization Package 动态生成 Seedance Prompt，使用原视频和参考素材生成包含目标语言对白、BGM、环境声、音效和口型同步的完整有声视频。
+4. 输出直接保存为 `output/final_<target_locale>.mp4`，不执行独立配音、音轨替换、混音、二次变速或二次 lip-sync。
 
-每个任务的原始 Provider 响应保存在 `work/<job_id>/json/raw/`。任务使用 v3 checkpoint；旧链路 checkpoint 必须新建任务，不会回退到旧实现。Seedance 任务 ID 会在轮询前保存，失败后可使用“重新执行失败步骤”。
+每个任务的 checkpoint 保存在 `work/<job_id>/checkpoint.json`，原始 Provider 响应保存在 `work/<job_id>/json/raw/`。任务使用 v4 checkpoint；旧链路 checkpoint 会在“执行历史”中标记为不可恢复，必须新建任务。每次 Seedance 尝试单独保存到 `json/nodes/seedance/attempt_<n>/`，其中包含输入 content、结果或失败记录和输出文件。
+
+应用重启后不会自动调用云端。执行历史栏目会扫描本地 checkpoint，并提供“确认并执行 Seedance”“继续等待 Seedance”和“重试失败节点”。如果轮询中断但云端任务仍存在，会继续使用原 Seedance task ID；只有已经终态失败的 Seedance 才会创建新的 task。Doubao Localization Package 不会因为 Seedance 重试而重新执行。
 
 ## 测试
 

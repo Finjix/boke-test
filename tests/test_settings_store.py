@@ -47,3 +47,14 @@ class SettingsStoreTests(unittest.TestCase):
             store = SettingsStore(Path(directory) / "settings.json")
             store.save({"ark_api_key": ""})
             self.assertEqual(store.load()["ark_api_key"], "")
+
+    def test_auto_continue_preference_round_trips_separately_from_provider_values(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SettingsStore(Path(directory) / "settings.json")
+            store.save(
+                {"ark_api_key": "ark-secret"},
+                preferences={"auto_continue_to_seedance": True},
+            )
+
+            self.assertEqual(store.load(), {"ark_api_key": "ark-secret", "seedance_model_id": ""})
+            self.assertEqual(store.load_preferences(), {"auto_continue_to_seedance": True})

@@ -1,11 +1,12 @@
-"""Doubao video-understanding contract for the v3 localization pipeline."""
+"""Doubao video-understanding contract for the localization pipeline."""
 
 from __future__ import annotations
 
 import json
 import math
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from core.models import LocalizationDialogue, LocalizationPackage
 from utils.errors import ValidationError
@@ -265,12 +266,14 @@ def analyze_video(
     duration_seconds: float,
     raw_dir: Path | None = None,
     logger: JobLogger | None = None,
+    attempt_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> LocalizationPackage:
     """Call Doubao once, with one same-model correction attempt."""
 
     last_error: Exception | None = None
     correction_error: str | None = None
     for attempt in range(1, ANALYSIS_CORRECTION_ATTEMPTS + 1):
+        attempt_started = datetime.now(timezone.utc).isoformat()
         messages = build_video_analysis_messages(
             source_video_url,
             target_language=target_language,
@@ -278,6 +281,7 @@ def analyze_video(
             target_locale=target_locale,
             correction_error=correction_error,
         )
+        response: Any = None
         try:
             response = client.chat(
                 messages,
@@ -287,7 +291,7 @@ def analyze_video(
             )
             content = client.extract_text(response)
             value = parse_strict_json(content, description="video localization package")
-            return validate_localization_package(
+            package = validate_localization_package(
                 value,
                 target_language=target_language,
                 target_region=target_region,
@@ -295,6 +299,22 @@ def analyze_video(
                 duration_seconds=duration_seconds,
             )
         except ValidationError as exc:
+            if attempt_callback is not None:
+                attempt_callback(
+                    {
+                        "attempt": attempt,
+                        "status": "failed",
+                        "started_at": attempt_started,
+                        "finished_at": datetime.now(timezone.utc).isoformat(),
+                        "request_id": getattr(response, "request_id", None),
+                        "raw_response_path": (
+                            str(response.raw_path)
+                            if getattr(response, "raw_path", None)
+                            else None
+                        ),
+                        "error": {"message": str(exc)},
+                    }
+                )
             last_error = exc
             correction_error = str(exc)
             if logger is not None:
@@ -305,5 +325,45 @@ def analyze_video(
                 )
             if attempt == ANALYSIS_CORRECTION_ATTEMPTS:
                 raise
+        except Exception as exc:  # noqa: BLE001 - provider errors are recorded then re-raised
+            if attempt_callback is not None:
+                attempt_callback(
+                    {
+                        "attempt": attempt,
+                        "status": "failed",
+                        "started_at": attempt_started,
+                        "finished_at": datetime.now(timezone.utc).isoformat(),
+                        "request_id": getattr(response, "request_id", None)
+                        or getattr(exc, "request_id", None)
+                        or getattr(client, "last_request_id", None),
+                        "raw_response_path": (
+                            str(response.raw_path)
+                            if getattr(response, "raw_path", None)
+                            else getattr(exc, "raw_response_path", None)
+                        ),
+                        "error": {
+                            "message": str(exc),
+                            "error_code": getattr(exc, "error_code", None),
+                        },
+                    }
+                )
+            raise
+        else:
+            if attempt_callback is not None:
+                attempt_callback(
+                    {
+                        "attempt": attempt,
+                        "status": "completed",
+                        "started_at": attempt_started,
+                        "finished_at": datetime.now(timezone.utc).isoformat(),
+                        "request_id": getattr(response, "request_id", None),
+                        "raw_response_path": (
+                            str(response.raw_path)
+                            if getattr(response, "raw_path", None)
+                            else None
+                        ),
+                    }
+                )
+            return package
     assert last_error is not None
     raise last_error

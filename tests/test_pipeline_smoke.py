@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,7 +13,7 @@ from config import AppConfig
 from core.models import JobSpec, UploadedAsset
 from core.pipeline import PIPELINE_VERSION, VideoLocalizationPipeline
 from media.ffprobe import MediaInfo
-from utils.errors import PreflightError, ValidationError
+from utils.errors import PreflightError, ProviderError, ValidationError
 
 
 def _spec(source: Path) -> JobSpec:
@@ -120,6 +120,58 @@ class FakeSeedance:
         return None
 
 
+class FailThenSucceedSeedance(FakeSeedance):
+    def create_task(self, content, **kwargs):
+        self.create_calls.append((content, kwargs))
+        task_id = f"seedance-task-{len(self.create_calls)}"
+        return SeedanceTask(task_id, f"seedance-req-{len(self.create_calls)}", {"id": task_id})
+
+    def wait_task(self, task_id, **kwargs):
+        self.wait_calls.append(task_id)
+        if len(self.wait_calls) == 1:
+            raise ProviderError(
+                "Seedance task ended with status failed",
+                provider="seedance",
+                error_code="FAILED",
+                request_id="seedance-failed-query",
+                payload={"id": task_id, "status": "failed"},
+                retryable=False,
+            )
+        return ApiResponse(
+            {
+                "id": task_id,
+                "status": "succeeded",
+                "content": {"video_url": "https://example.test/video.mp4"},
+            },
+            "seedance-success-query",
+        )
+
+
+class TimeoutThenSucceedSeedance(FakeSeedance):
+    def create_task(self, content, **kwargs):
+        self.create_calls.append((content, kwargs))
+        return SeedanceTask("seedance-active-task", "seedance-create", {"id": "seedance-active-task"})
+
+    def wait_task(self, task_id, **kwargs):
+        self.wait_calls.append(task_id)
+        if len(self.wait_calls) == 1:
+            raise ProviderError(
+                "Seedance task polling timed out",
+                provider="seedance",
+                error_code="TASK_TIMEOUT",
+                request_id="seedance-timeout-query",
+                retryable=False,
+            )
+        return ApiResponse(
+            {
+                "id": task_id,
+                "status": "succeeded",
+                "content": {"video_url": "https://example.test/video.mp4"},
+            },
+            "seedance-success-query",
+        )
+
+
 class FakeNoopArk:
     def __init__(self) -> None:
         self.calls = 0
@@ -197,7 +249,11 @@ class PipelineSmokeTests(unittest.TestCase):
             ), patch(
                 "core.pipeline.ffprobe.probe", side_effect=lambda path, **kwargs: self._probe(Path(path))
             ):
-                output = pipeline.run(_spec(source), skip_preflight=True)
+                output = pipeline.run(
+                    _spec(source),
+                    skip_preflight=True,
+                    execution_mode="auto",
+                )
 
             self.assertTrue(output.is_file())
             self.assertEqual(output.name, "final_ar-SA.mp4")
@@ -272,8 +328,265 @@ class PipelineSmokeTests(unittest.TestCase):
                 "core.pipeline.ffprobe.probe", side_effect=fake_probe
             ):
                 with self.assertRaisesRegex(ValidationError, "generated audio"):
-                    pipeline.run(_spec(source), skip_preflight=True)
+                    pipeline.run(
+                        _spec(source),
+                        skip_preflight=True,
+                        execution_mode="auto",
+                    )
             self.assertTrue(any(event["event_type"] == "error" for event in events))
+
+    def test_manual_mode_pauses_after_doubao_until_approved(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "input.mp4"
+            source.write_bytes(b"source")
+            config = AppConfig(work_dir=root / "work", seedance_model_id="ep-test")
+            ark = FakeArk()
+            seedance = FakeSeedance()
+            pipeline = VideoLocalizationPipeline(
+                config,
+                ark_client=ark,
+                uguu_client=FakeUguu(),
+                seedance_client=seedance,
+            )
+
+            def fake_download(url, output_path, **kwargs):
+                output_path = Path(output_path)
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_bytes(b"seedance-final-video")
+                return output_path
+
+            with patch(
+                "core.pipeline.download", side_effect=fake_download
+            ), patch(
+                "core.pipeline.ffprobe.probe", side_effect=lambda path, **kwargs: self._probe(Path(path))
+            ):
+                paused = pipeline.run(_spec(source), skip_preflight=True)
+                self.assertEqual(paused.stage, "waiting_for_approval")
+                self.assertEqual(paused.action_required, "approve_seedance")
+                self.assertEqual(len(ark.calls), 1)
+                self.assertEqual(len(seedance.create_calls), 0)
+                self.assertIsNotNone(paused.package_path)
+
+                job_id = paused.job_id
+                checkpoint_path = config.work_dir / job_id / "checkpoint.json"
+                checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+                self.assertEqual(checkpoint["stage"], "waiting_for_approval")
+                self.assertTrue((config.work_dir / job_id / "json/localization_package.json").is_file())
+
+                completed = pipeline.approve_seedance(job_id)
+
+            self.assertTrue(completed.is_file())
+            self.assertEqual(len(ark.calls), 1)
+            self.assertEqual(len(seedance.create_calls), 1)
+            final_checkpoint = json.loads(
+                (config.work_dir / job_id / "checkpoint.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(final_checkpoint["stage"], "completed")
+            self.assertEqual(
+                [item["node"] for item in final_checkpoint["node_executions"]],
+                ["doubao", "seedance"],
+            )
+            self.assertTrue((config.work_dir / "history.json").is_file())
+
+    def test_recovery_after_saved_doubao_result_does_not_call_doubao_again(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "input.mp4"
+            source.write_bytes(b"source")
+            config = AppConfig(work_dir=root / "work", seedance_model_id="ep-test")
+            ark = FakeArk()
+            seedance = FakeSeedance()
+            pipeline = VideoLocalizationPipeline(
+                config,
+                ark_client=ark,
+                uguu_client=FakeUguu(),
+                seedance_client=seedance,
+            )
+
+            def fake_download(url, output_path, **kwargs):
+                output_path = Path(output_path)
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_bytes(b"seedance-final-video")
+                return output_path
+
+            with patch(
+                "core.pipeline.download", side_effect=fake_download
+            ), patch(
+                "core.pipeline.ffprobe.probe", side_effect=lambda path, **kwargs: self._probe(Path(path))
+            ):
+                paused = pipeline.run(_spec(source), skip_preflight=True)
+                checkpoint_path = config.work_dir / paused.job_id / "checkpoint.json"
+                checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+                checkpoint["stage"] = "analyzing"
+                checkpoint["approval_status"] = "not_required"
+                checkpoint_path.write_text(
+                    json.dumps(checkpoint, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+
+                restarted = VideoLocalizationPipeline(
+                    config,
+                    ark_client=ark,
+                    uguu_client=FakeUguu(),
+                    seedance_client=seedance,
+                )
+                recovered = restarted.resume_failed(paused.job_id)
+                self.assertEqual(recovered.stage, "waiting_for_approval")
+                completed = restarted.approve_seedance(paused.job_id)
+
+            self.assertTrue(completed.is_file())
+            self.assertEqual(len(ark.calls), 1)
+            self.assertEqual(len(seedance.create_calls), 1)
+
+    def test_seedance_retry_reuses_doubao_and_keeps_attempts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "input.mp4"
+            source.write_bytes(b"source")
+            config = AppConfig(work_dir=root / "work", seedance_model_id="ep-test")
+            ark = FakeArk()
+            seedance = FailThenSucceedSeedance()
+            pipeline = VideoLocalizationPipeline(
+                config,
+                ark_client=ark,
+                uguu_client=FakeUguu(),
+                seedance_client=seedance,
+            )
+
+            def fake_download(url, output_path, **kwargs):
+                output_path = Path(output_path)
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_bytes(b"seedance-final-video")
+                return output_path
+
+            with patch(
+                "core.pipeline.download", side_effect=fake_download
+            ), patch(
+                "core.pipeline.ffprobe.probe", side_effect=lambda path, **kwargs: self._probe(Path(path))
+            ):
+                paused = pipeline.run(_spec(source), skip_preflight=True)
+                with self.assertRaises(ProviderError):
+                    pipeline.approve_seedance(paused.job_id)
+                failed_checkpoint = json.loads(
+                    (config.work_dir / paused.job_id / "checkpoint.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(failed_checkpoint["stage"], "failed")
+                self.assertEqual(len(ark.calls), 1)
+                self.assertEqual(len(seedance.create_calls), 1)
+
+                result = pipeline.retry_seedance(paused.job_id)
+
+            self.assertTrue(result.is_file())
+            self.assertEqual(len(ark.calls), 1)
+            self.assertEqual(len(seedance.create_calls), 2)
+            self.assertEqual(seedance.wait_calls, ["seedance-task-1", "seedance-task-2"])
+            checkpoint = json.loads(
+                (config.work_dir / paused.job_id / "checkpoint.json").read_text(encoding="utf-8")
+            )
+            seedance_nodes = [
+                item for item in checkpoint["node_executions"] if item["node"] == "seedance"
+            ]
+            self.assertEqual([item["attempt"] for item in seedance_nodes], [1, 2])
+            self.assertEqual([item["status"] for item in seedance_nodes], ["failed", "completed"])
+            self.assertTrue(
+                (config.work_dir / paused.job_id / "json/nodes/seedance/attempt_001/failure.json").is_file()
+            )
+            self.assertTrue(
+                (config.work_dir / paused.job_id / "json/nodes/seedance/attempt_002/result.json").is_file()
+            )
+
+    def test_continue_seedance_reuses_active_task_after_poll_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "input.mp4"
+            source.write_bytes(b"source")
+            config = AppConfig(work_dir=root / "work", seedance_model_id="ep-test")
+            ark = FakeArk()
+            seedance = TimeoutThenSucceedSeedance()
+            pipeline = VideoLocalizationPipeline(
+                config,
+                ark_client=ark,
+                uguu_client=FakeUguu(),
+                seedance_client=seedance,
+            )
+
+            def fake_download(url, output_path, **kwargs):
+                output_path = Path(output_path)
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_bytes(b"seedance-final-video")
+                return output_path
+
+            with patch(
+                "core.pipeline.download", side_effect=fake_download
+            ), patch(
+                "core.pipeline.ffprobe.probe", side_effect=lambda path, **kwargs: self._probe(Path(path))
+            ):
+                paused = pipeline.run(_spec(source), skip_preflight=True)
+                with self.assertRaises(ProviderError):
+                    pipeline.approve_seedance(paused.job_id)
+
+                restarted = VideoLocalizationPipeline(
+                    config,
+                    ark_client=ark,
+                    uguu_client=FakeUguu(),
+                    seedance_client=seedance,
+                )
+                result = restarted.continue_seedance(paused.job_id)
+
+            self.assertTrue(result.is_file())
+            self.assertEqual(len(ark.calls), 1)
+            self.assertEqual(len(seedance.create_calls), 1)
+            self.assertEqual(seedance.wait_calls, ["seedance-active-task", "seedance-active-task"])
+
+    def test_seedance_retry_refreshes_expired_uguu_without_reanalyzing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "input.mp4"
+            source.write_bytes(b"source")
+            config = AppConfig(work_dir=root / "work", seedance_model_id="ep-test")
+            ark = FakeArk()
+            uguu = FakeUguu()
+            seedance = FailThenSucceedSeedance()
+            pipeline = VideoLocalizationPipeline(
+                config,
+                ark_client=ark,
+                uguu_client=uguu,
+                seedance_client=seedance,
+            )
+
+            def fake_download(url, output_path, **kwargs):
+                output_path = Path(output_path)
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_bytes(b"seedance-final-video")
+                return output_path
+
+            with patch(
+                "core.pipeline.download", side_effect=fake_download
+            ), patch(
+                "core.pipeline.ffprobe.probe", side_effect=lambda path, **kwargs: self._probe(Path(path))
+            ):
+                paused = pipeline.run(_spec(source), skip_preflight=True)
+                with self.assertRaises(ProviderError):
+                    pipeline.approve_seedance(paused.job_id)
+
+                assets_path = config.work_dir / paused.job_id / "json/assets.json"
+                assets = json.loads(assets_path.read_text(encoding="utf-8"))
+                expired_at = (
+                    datetime.now(timezone.utc) - timedelta(hours=4)
+                ).isoformat()
+                for asset in assets:
+                    asset["uploaded_at"] = expired_at
+                assets_path.write_text(
+                    json.dumps(assets, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+
+                result = pipeline.retry_seedance(paused.job_id)
+
+            self.assertTrue(result.is_file())
+            self.assertEqual(len(ark.calls), 1)
+            self.assertEqual(len(uguu.assets), 2)
 
     def test_old_checkpoint_is_rejected_instead_of_falling_back(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -17,6 +17,9 @@ EDITABLE_SETTING_NAMES = (
     "ark_api_key",
     "seedance_model_id",
 )
+PREFERENCE_NAMES = (
+    "auto_continue_to_seedance",
+)
 
 
 class SettingsStore:
@@ -43,14 +46,54 @@ class SettingsStore:
             if isinstance(value := values.get(name), str)
         }
 
-    def save(self, values: Mapping[str, str]) -> None:
+    def load_preferences(self) -> dict[str, bool]:
+        """Load non-secret UI preferences with safe defaults."""
+
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return {}
+        preferences = payload.get("preferences", {}) if isinstance(payload, dict) else {}
+        if not isinstance(preferences, dict):
+            return {}
+        result: dict[str, bool] = {}
+        for name in PREFERENCE_NAMES:
+            value = preferences.get(name)
+            if isinstance(value, bool):
+                result[name] = value
+            elif isinstance(value, str) and value.strip().casefold() in {"1", "true", "yes", "on"}:
+                result[name] = True
+            elif isinstance(value, str) and value.strip().casefold() in {"0", "false", "no", "off"}:
+                result[name] = False
+        return result
+
+    def save(
+        self,
+        values: Mapping[str, str],
+        *,
+        preferences: Mapping[str, bool] | None = None,
+    ) -> None:
         """Persist editable settings without leaving a partially written file."""
 
         normalized = {
             name: str(values.get(name, "")).strip()
             for name in EDITABLE_SETTING_NAMES
         }
-        payload = {"version": 3, "values": normalized}
+        old_preferences = self.load_preferences()
+        normalized_preferences = {
+            name: bool(
+                (preferences or {}).get(
+                    name,
+                    old_preferences.get(name, False),
+                )
+            )
+            for name in PREFERENCE_NAMES
+        }
+        payload = {
+            "version": 3,
+            "values": normalized,
+            "preferences": normalized_preferences,
+        }
         temporary_path = self.path.with_name(f".{self.path.name}.tmp")
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)

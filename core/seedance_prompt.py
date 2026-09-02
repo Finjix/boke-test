@@ -1,4 +1,4 @@
-"""Dynamic Seedance prompt construction for the v3 localization pipeline."""
+"""Dynamic Seedance prompt construction for the localization pipeline."""
 
 from __future__ import annotations
 

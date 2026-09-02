@@ -23,6 +23,7 @@ class SettingsPanel(ttk.LabelFrame):
         self._vars: dict[str, tk.StringVar] = {}
         self._store = SettingsStore(settings_path)
         stored = self._store.load()
+        preferences = self._store.load_preferences()
         rows = (
             ("Ark API Key", "ark_api_key", True, config.ark_api_key),
             ("Seedance Model/Endpoint ID", "seedance_model_id", False, config.seedance_model_id),
@@ -33,6 +34,14 @@ class SettingsPanel(ttk.LabelFrame):
             self._vars[name] = variable
             entry = ttk.Entry(self, textvariable=variable, width=48, show="*" if secret else "")
             entry.grid(row=row, column=1, sticky="ew", pady=3)
+        self.auto_continue_var = tk.BooleanVar(
+            value=preferences.get("auto_continue_to_seedance", False)
+        )
+        ttk.Checkbutton(
+            self,
+            text="Doubao 完成后自动进入 Seedance（关闭则等待人工确认）",
+            variable=self.auto_continue_var,
+        ).grid(row=len(rows), column=0, columnspan=2, sticky="w", pady=(6, 0))
         self.columnconfigure(1, weight=1)
 
     def get_overrides(self) -> dict[str, str]:
@@ -49,7 +58,15 @@ class SettingsPanel(ttk.LabelFrame):
 
         return {name: value for name, value in self.get_overrides().items() if value}
 
+    def get_auto_continue_to_seedance(self) -> bool:
+        return bool(self.auto_continue_var.get())
+
     def save(self) -> None:
         """Save the current fields for the next application launch."""
 
-        self._store.save(self.get_overrides())
+        self._store.save(
+            self.get_overrides(),
+            preferences={
+                "auto_continue_to_seedance": self.get_auto_continue_to_seedance(),
+            },
+        )
