@@ -6,16 +6,18 @@
 
 要求：
 
-- Python 3.11 或更高版本
-- Node.js 18 或更高版本（仅用于本地 MediaKit 包管理）
+- Windows 10/11 x64
+- 首次启动时可以访问互联网
 
 ```powershell
 .\tools\install_dependencies.ps1
 ```
 
-安装脚本会创建 `.venv`、将 Python 依赖安装到项目内，下载并校验项目内的
-FFmpeg/FFprobe，并将 MediaKit CLI 放到 `tools\mediakit\mediakit-cli.exe`。
-程序会自动优先使用这些本地工具，不依赖系统级 pip 或全局 MediaKit CLI。
+也可以直接双击根目录的 `start_app.cmd`，脚本会在首次启动时自动完成上述准备。
+安装脚本只使用 Windows 自带的 PowerShell，下载并校验项目内的 Python 3.13.15，
+将依赖安装到该运行时，并下载项目内的 FFmpeg/FFprobe 和 MediaKit CLI；不要求系统级
+Python、pip、Node.js 或全局 MediaKit CLI。运行时和下载缓存位于被 Git 忽略的目录，
+新克隆项目时会自动重新准备。
 FFmpeg Windows 构建入口见
 [FFmpeg 官方下载页](https://ffmpeg.org/download.html)，MediaKit CLI 使用
 [官方仓库](https://github.com/volcengine/mediakit-cli)。
@@ -35,7 +37,7 @@ FFmpeg Windows 构建入口见
 双击根目录的 `start_app.cmd`，或在 PowerShell 中执行：
 
 ```powershell
-.\.venv\Scripts\python.exe app.py
+.\runtime\python3.13.15\python.exe app.py
 ```
 
 点击“开始”后会先执行 Preflight。任何依赖、凭证、模型权限或 Uguu 文件大小检查失败，正式 Pipeline 都不会启动。Uguu 仅作为内部临时上传 Provider 使用，桌面设置中不提供 Uguu 配置项。
@@ -57,8 +59,8 @@ FFmpeg Windows 构建入口见
 ## 测试
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
-.\.venv\Scripts\python.exe -m compileall -q .
+.\runtime\python3.13.15\python.exe -m unittest discover -s tests -v
+.\runtime\python3.13.15\python.exe -m compileall -q .
 ```
 
 单元测试使用 HTTP 和 subprocess 测试替身，不会触发真实云端任务。真实视频验收仍需在依赖、凭证和模型权限就绪后手动执行，并检查最终画面、口型、背景音和音轨映射。

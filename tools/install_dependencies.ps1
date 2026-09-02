@@ -7,20 +7,44 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $ProjectRoot
 
-$VenvPython = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
-if (-not (Test-Path -LiteralPath $VenvPython)) {
-    Write-Host "Creating project-local Python environment..."
-    python -m venv (Join-Path $ProjectRoot ".venv")
-}
-
-Write-Host "Installing Python packages into .venv..."
-& $VenvPython -m pip install -r (Join-Path $ProjectRoot "requirements.txt")
-if ($LASTEXITCODE -ne 0) {
-    throw "Project-local Python dependency installation failed."
-}
-
 $DownloadRoot = Join-Path $ProjectRoot "tools\downloads"
 New-Item -ItemType Directory -Force -Path $DownloadRoot | Out-Null
+
+$RuntimeDir = Join-Path $ProjectRoot "runtime\python3.13.15"
+$ProjectPython = Join-Path $RuntimeDir "python.exe"
+$PythonArchive = Join-Path $DownloadRoot "python-3.13.15-amd64.zip"
+$PythonUrl = "https://www.python.org/ftp/python/3.13.15/python-3.13.15-amd64.zip"
+# SHA-256 for the official CPython 3.13.15 AMD64 ZIP package.
+$PythonSha256 = "6479223746cdfb79d25865110d6f524ac98de081324e119af1dc3ae36bddc7a5"
+$ReadyMarker = Join-Path $RuntimeDir ".project-ready"
+
+function Get-Sha256 {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    $Algorithm = [Security.Cryptography.SHA256]::Create()
+    $Stream = [IO.File]::OpenRead($Path)
+    try {
+        $Bytes = $Algorithm.ComputeHash($Stream)
+    } finally {
+        $Stream.Dispose()
+        $Algorithm.Dispose()
+    }
+    return ([BitConverter]::ToString($Bytes) -replace "-", "").ToLowerInvariant()
+}
+
+function Assert-Sha256 {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Expected
+    )
+
+    $Actual = Get-Sha256 -Path $Path
+    if ($Actual -ne $Expected.ToLowerInvariant()) {
+        throw "SHA-256 verification failed for $Path. Expected $Expected, got $Actual."
+    }
+}
 
 function Get-And-VerifyFile {
     param(
@@ -45,10 +69,28 @@ function Get-And-VerifyFile {
     } else {
         $Expected = $ChecksumLines[0].Trim().Split()[0].ToLowerInvariant()
     }
-    $Actual = (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($Expected -ne $Actual) {
-        throw "SHA-256 verification failed for $Destination"
+    Assert-Sha256 -Path $Destination -Expected $Expected
+}
+
+if (-not (Test-Path -LiteralPath $ProjectPython)) {
+    if (-not (Test-Path -LiteralPath $PythonArchive)) {
+        Write-Host "Downloading project-local Python 3.13.15..."
+        Invoke-WebRequest -Uri $PythonUrl -OutFile $PythonArchive -UseBasicParsing
     }
+    Assert-Sha256 -Path $PythonArchive -Expected $PythonSha256
+    New-Item -ItemType Directory -Force -Path $RuntimeDir | Out-Null
+    Write-Host "Extracting project-local Python to $RuntimeDir..."
+    Expand-Archive -LiteralPath $PythonArchive -DestinationPath $RuntimeDir -Force
+}
+
+if (-not (Test-Path -LiteralPath $ProjectPython)) {
+    throw "Project-local Python 3.13.15 was not installed at $ProjectPython"
+}
+
+Write-Host "Installing Python packages into the project-local runtime..."
+& $ProjectPython -m pip install --disable-pip-version-check -r (Join-Path $ProjectRoot "requirements.txt")
+if ($LASTEXITCODE -ne 0) {
+    throw "Project-local Python dependency installation failed."
 }
 
 if (-not $SkipFfmpeg) {
@@ -84,13 +126,27 @@ if (-not $SkipMediaKit) {
             throw "MediaKit CLI archive extraction failed."
         }
     }
+}
 
-    Write-Host "Registering the MediaKit npm package locally without a global install..."
-    npm install --save-exact --ignore-scripts @volcengine/mediakit-cli@0.2.1
-    if ($LASTEXITCODE -ne 0) {
-        throw "Local MediaKit npm package installation failed."
+if (-not $SkipFfmpeg) {
+    if (-not (Test-Path -LiteralPath (Join-Path $ProjectRoot "tools\ffmpeg\bin\ffmpeg.exe"))) {
+        throw "FFmpeg was not installed."
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $ProjectRoot "tools\ffmpeg\bin\ffprobe.exe"))) {
+        throw "FFprobe was not installed."
+    }
+}
+if (-not $SkipMediaKit) {
+    if (-not (Test-Path -LiteralPath (Join-Path $ProjectRoot "tools\mediakit\mediakit-cli.exe"))) {
+        throw "MediaKit CLI was not installed."
     }
 }
 
+if (-not $SkipFfmpeg -and -not $SkipMediaKit) {
+    $RequirementsHash = Get-Sha256 -Path (Join-Path $ProjectRoot "requirements.txt")
+    $MarkerText = "Python=3.13.15`r`nRequirementsSHA256=$RequirementsHash`r`n"
+    [IO.File]::WriteAllText($ReadyMarker, $MarkerText, [Text.UTF8Encoding]::new($false))
+}
+
 Write-Host "Project-local dependencies are ready."
-Write-Host "Run with: .\.venv\Scripts\python.exe app.py"
+Write-Host "Run with: .\runtime\python3.13.15\python.exe app.py"
