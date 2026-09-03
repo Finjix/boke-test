@@ -116,16 +116,12 @@ class ConfigAndUiContractTests(unittest.TestCase):
             prompt,
         )
 
-    def test_generation_prompt_restores_hard_rules_after_context_ir(self) -> None:
+    def test_generation_prompt_forwards_context_ir_without_appending_rules(self) -> None:
         locale = locale_from_code("ar-SA")
         self.assertIsNotNone(locale)
         prompt = build_generation_prompt(locale, "Context-IR returned analysis")
-        self.assertIn("Context-IR returned analysis", prompt)
-        self.assertIn("无论上述分析如何表述", prompt)
-        self.assertIn("镜头双轨契约", prompt)
-        self.assertIn("不得保留或生成源语言文字、拉丁字母招牌", prompt)
-        self.assertIn("时空连续性轨", prompt)
-        self.assertIn("视觉本地化轨", prompt)
+        self.assertEqual(prompt, "Context-IR returned analysis")
+        self.assertNotIn("镜头双轨契约", prompt)
 
     def test_generation_prompt_rejects_overlong_context_ir_without_truncation(self) -> None:
         locale = locale_from_code("ar-SA")
@@ -137,11 +133,11 @@ class ConfigAndUiContractTests(unittest.TestCase):
         ):
             build_generation_prompt(locale, analysis)
 
-    def test_maximum_length_context_ir_leaves_room_for_hard_rules(self) -> None:
+    def test_maximum_length_context_ir_can_use_h3_limit(self) -> None:
         locale = locale_from_code("ar-SA")
         self.assertIsNotNone(locale)
         prompt = build_generation_prompt(locale, "镜头" * (MAX_CONTEXT_IR_ANALYSIS_CHARS // 2))
-        self.assertLessEqual(len(prompt), MAX_H3_PROMPT_CHARS)
+        self.assertEqual(len(prompt), MAX_H3_PROMPT_CHARS)
 
     def test_settings_store_keeps_only_the_key(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
