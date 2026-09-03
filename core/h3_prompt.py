@@ -17,7 +17,7 @@ from utils.errors import ValidationError
 
 
 MAX_H3_PROMPT_CHARS = 7000
-MAX_CONTEXT_IR_ANALYSIS_CHARS = MAX_H3_PROMPT_CHARS
+MAX_CONTEXT_IR_ANALYSIS_CHARS = 6000
 IMAGE_MIME_TYPES = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
@@ -111,13 +111,20 @@ def build_context_ir_prompt(
     return "\n".join(lines)
 
 
-def build_generation_prompt(_locale: TargetLocale, enhanced_prompt: str) -> str:
-    """Validate and forward Context-IR analysis without appending extra rules."""
+def build_generation_prompt(locale: TargetLocale, enhanced_prompt: str) -> str:
+    """Keep Context-IR analysis while restoring the final localization contract."""
 
-    return _validate_prompt(
+    analysis = _validate_prompt(
         enhanced_prompt,
         "结构提示词",
         max_chars=MAX_CONTEXT_IR_ANALYSIS_CHARS,
+    )
+    rules = "\n".join(_scene_localization_rules(locale))
+    prefix = "以下是 Context-IR 的镜头分析，请据此生成视频：\n"
+    suffix = f"\n\n无论上述分析如何表述，以下规则不得省略或降级：\n{rules}"
+    return _validate_prompt(
+        f"{prefix}{analysis}{suffix}",
+        "最终提示词",
     )
 
 
