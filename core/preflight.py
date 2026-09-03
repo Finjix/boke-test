@@ -48,17 +48,11 @@ def run_preflight(
     )
     add("target locale", bool(spec.target_locale), spec.target_locale)
     add("input video", Path(spec.input_video).is_file(), str(spec.input_video))
-    if spec.person_image is not None:
+    for index, reference_image in enumerate(spec.reference_images, start=1):
         add(
-            "person reference",
-            Path(spec.person_image).is_file(),
-            str(spec.person_image),
-        )
-    if spec.scene_image is not None:
-        add(
-            "scene reference",
-            Path(spec.scene_image).is_file(),
-            str(spec.scene_image),
+            f"reference image {index}",
+            Path(reference_image).is_file(),
+            str(reference_image),
         )
 
     return PreflightReport(

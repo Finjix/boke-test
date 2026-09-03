@@ -21,6 +21,7 @@ from config import (
 from core.h3_prompt import (
     build_context_ir_content,
     build_context_ir_prompt,
+    build_generation_prompt,
     build_video_content,
     ensure_payload_size,
     file_data_url,
@@ -103,35 +104,23 @@ class VideoLocalizationPipeline:
                     kind="video",
                     label="视频",
                 )
-                person_data_url = (
+                reference_data_urls = [
                     file_data_url(
-                        Path(spec.person_image),
+                        Path(reference_image),
                         kind="image",
-                        label="人物参考图",
+                        label="参考图",
                     )
-                    if spec.person_image is not None
-                    else None
-                )
-                scene_data_url = (
-                    file_data_url(
-                        Path(spec.scene_image),
-                        kind="image",
-                        label="场景参考图",
-                    )
-                    if spec.scene_image is not None
-                    else None
-                )
+                    for reference_image in spec.reference_images
+                ]
 
                 requirement = build_context_ir_prompt(
                     locale,
-                    has_person_image=person_data_url is not None,
-                    has_scene_image=scene_data_url is not None,
+                    has_reference_images=bool(reference_data_urls),
                 )
                 context_content = build_context_ir_content(
                     video_data_url,
                     requirement,
-                    person_image_url=person_data_url,
-                    scene_image_url=scene_data_url,
+                    reference_image_urls=reference_data_urls,
                 )
                 ensure_payload_size(
                     {
@@ -165,12 +154,12 @@ class VideoLocalizationPipeline:
                         provider=CONTEXT_IR_TASK_KIND,
                         error_code="PROMPT_MISSING",
                     )
+                generation_prompt = build_generation_prompt(locale, enhanced_prompt)
 
                 video_content = build_video_content(
                     video_data_url,
-                    enhanced_prompt,
-                    person_image_url=person_data_url,
-                    scene_image_url=scene_data_url,
+                    generation_prompt,
+                    reference_image_urls=reference_data_urls,
                 )
                 ensure_payload_size(
                     {

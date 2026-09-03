@@ -8,7 +8,7 @@ from unittest.mock import patch
 from api.common import ApiResponse
 from api.minimax import MiniMaxTask
 from config import AppConfig
-from core.models import JobSpec, PipelineEvent, PipelineStage
+from core.models import JobSpec, PipelineEvent, PipelineStage, generation_duration
 from core.pipeline import VideoLocalizationPipeline
 from media.ffprobe import MediaInfo
 from utils.errors import ProviderError, ValidationError
@@ -93,8 +93,7 @@ class SimplifiedPipelineTests(unittest.TestCase):
         self,
         *,
         source_duration: float = 5.2,
-        person: bool = False,
-        scene: bool = False,
+        references: int = 0,
         fail_context: bool = False,
         source_exists: bool = True,
         source_has_video: bool = True,
@@ -105,12 +104,11 @@ class SimplifiedPipelineTests(unittest.TestCase):
         source = root_path / "source.mkv"
         if source_exists:
             source.write_bytes(b"source")
-        person_path = root_path / "person.png"
-        scene_path = root_path / "scene.jpg"
-        if person:
-            person_path.write_bytes(b"person")
-        if scene:
-            scene_path.write_bytes(b"scene")
+        reference_paths = []
+        for index in range(references):
+            reference_path = root_path / f"reference-{index + 1}.png"
+            reference_path.write_bytes(f"reference-{index + 1}".encode())
+            reference_paths.append(reference_path)
         config = AppConfig(
             minimax_api_key="test-key",
             work_dir=root_path / "work",
@@ -151,8 +149,7 @@ class SimplifiedPipelineTests(unittest.TestCase):
         )
         spec = JobSpec(
             input_video=source,
-            person_image=person_path if person else None,
-            scene_image=scene_path if scene else None,
+            reference_images=tuple(reference_paths),
             target_locale="ar-SA",
         )
         patches = (
@@ -176,7 +173,7 @@ class SimplifiedPipelineTests(unittest.TestCase):
         result, minimax, events, root = self._run()
         try:
             self.assertEqual(result.stage, PipelineStage.COMPLETED)
-            self.assertEqual(result.duration_seconds, 6)
+            self.assertEqual(result.duration_seconds, 5)
             self.assertEqual(len(minimax.context_calls), 1)
             self.assertEqual(len(minimax.video_calls), 1)
             self.assertEqual(
@@ -184,10 +181,10 @@ class SimplifiedPipelineTests(unittest.TestCase):
                 [("ir-1", "H3-Context-IR"), ("h3-1", "MiniMax-H3")],
             )
             self.assertEqual(len(minimax.context_calls[0]["content"]), 2)
-            self.assertEqual(
-                minimax.video_calls[0]["content"][0]["text"],
-                "enhanced-ir-1",
-            )
+            generation_prompt = minimax.video_calls[0]["content"][0]["text"]
+            self.assertIn("enhanced-ir-1", generation_prompt)
+            self.assertIn("本地化硬性验收规则", generation_prompt)
+            self.assertIn("不得保留或生成源语言文字、拉丁字母招牌", generation_prompt)
             self.assertRegex(result.output_path.name, r"^\d{8}_\d{6}(?:_\d{2})?\.mp4$")
             self.assertTrue(result.output_path.is_file())
             self.assertEqual(list((Path(root.name) / "work").iterdir()), [])
@@ -207,18 +204,30 @@ class SimplifiedPipelineTests(unittest.TestCase):
         finally:
             root.cleanup()
 
-    def test_optional_person_and_scene_images_are_reused_in_both_calls(self) -> None:
-        _, minimax, _, root = self._run(person=True, scene=True)
+    def test_generation_duration_uses_half_up_rounding(self) -> None:
+        self.assertEqual(generation_duration(3.0), 4)
+        self.assertEqual(generation_duration(4.49), 4)
+        self.assertEqual(generation_duration(4.5), 5)
+        self.assertEqual(generation_duration(5.2), 5)
+        self.assertEqual(generation_duration(14.5), 15)
+
+    def test_multiple_reference_images_are_reused_in_both_calls(self) -> None:
+        _, minimax, _, root = self._run(references=3)
         try:
             context_content = minimax.context_calls[0]["content"]
             video_content = minimax.video_calls[0]["content"]
             self.assertEqual(
                 [item["type"] for item in context_content],
-                ["text", "image_url", "image_url", "video_url"],
+                ["text", "image_url", "image_url", "image_url", "video_url"],
             )
             self.assertEqual(
                 [item["role"] for item in context_content[1:]],
-                ["reference_image", "reference_image", "reference_video"],
+                [
+                    "reference_image",
+                    "reference_image",
+                    "reference_image",
+                    "reference_video",
+                ],
             )
             self.assertEqual(context_content[1:], video_content[1:])
         finally:
@@ -239,20 +248,6 @@ class SimplifiedPipelineTests(unittest.TestCase):
     def test_source_without_video_stream_stops_before_provider_calls(self) -> None:
         with self.assertRaises(ValidationError):
             self._run(source_has_video=False)
-
-    def test_one_optional_reference_is_sent_to_both_calls(self) -> None:
-        for person, scene in ((True, False), (False, True)):
-            _, minimax, _, root = self._run(person=person, scene=scene)
-            try:
-                context_content = minimax.context_calls[0]["content"]
-                video_content = minimax.video_calls[0]["content"]
-                self.assertEqual(
-                    [item["type"] for item in context_content],
-                    ["text", "image_url", "video_url"],
-                )
-                self.assertEqual(context_content[1:], video_content[1:])
-            finally:
-                root.cleanup()
 
     def test_context_ir_failure_does_not_start_h3(self) -> None:
         with self.assertRaises(ProviderError):

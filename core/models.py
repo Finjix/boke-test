@@ -10,6 +10,7 @@ from pathlib import Path
 from config import (
     MINIMAX_GENERATION_MAX_DURATION_SECONDS,
     MINIMAX_GENERATION_MIN_DURATION_SECONDS,
+    MINIMAX_MAX_REFERENCE_IMAGES,
     MINIMAX_SOURCE_MAX_DURATION_SECONDS,
     MINIMAX_SOURCE_MIN_DURATION_SECONDS,
 )
@@ -31,19 +32,21 @@ class PipelineStage(str, Enum):
 class JobSpec:
     input_video: Path
     target_locale: str
-    person_image: Path | None = None
-    scene_image: Path | None = None
+    reference_images: tuple[Path, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "input_video", Path(self.input_video).expanduser())
-        if self.person_image is not None:
-            object.__setattr__(
-                self, "person_image", Path(self.person_image).expanduser()
+        try:
+            reference_images = tuple(
+                Path(image).expanduser() for image in self.reference_images
             )
-        if self.scene_image is not None:
-            object.__setattr__(
-                self, "scene_image", Path(self.scene_image).expanduser()
+        except TypeError as exc:
+            raise ValueError("参考图必须是图片路径列表") from exc
+        if len(reference_images) > MINIMAX_MAX_REFERENCE_IMAGES:
+            raise ValueError(
+                f"参考图最多上传 {MINIMAX_MAX_REFERENCE_IMAGES} 张"
             )
+        object.__setattr__(self, "reference_images", reference_images)
         locale_code = str(self.target_locale).strip()
         if locale_from_code(locale_code) is None:
             raise ValueError(f"unsupported target locale: {locale_code}")
@@ -100,8 +103,8 @@ def validate_source_duration(duration: float) -> None:
 def generation_duration(source_duration: float) -> int:
     """Convert a valid source duration to the integer accepted by H3."""
 
-    rounded_up = math.ceil(source_duration - 1e-9)
+    rounded = math.floor(source_duration + 0.5)
     return max(
         MINIMAX_GENERATION_MIN_DURATION_SECONDS,
-        min(MINIMAX_GENERATION_MAX_DURATION_SECONDS, rounded_up),
+        min(MINIMAX_GENERATION_MAX_DURATION_SECONDS, rounded),
     )

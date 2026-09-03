@@ -6,10 +6,18 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from config import MINIMAX_MAX_REFERENCE_IMAGES
 from config import AppConfig
-from core.h3_prompt import build_context_ir_prompt
+from core.h3_prompt import (
+    MAX_CONTEXT_IR_ANALYSIS_CHARS,
+    MAX_H3_PROMPT_CHARS,
+    build_context_ir_prompt,
+    build_generation_prompt,
+)
 from core.models import JobSpec
 from language_config import locale_from_code
+from ui.window import append_reference_images
+from utils.errors import ValidationError
 from utils.settings_store import SettingsStore
 
 
@@ -42,29 +50,93 @@ class ConfigAndUiContractTests(unittest.TestCase):
             },
         )
 
-    def test_job_spec_contains_one_video_and_two_optional_images(self) -> None:
+    def test_job_spec_contains_one_video_and_multiple_optional_reference_images(self) -> None:
         spec = JobSpec(
             input_video=Path("source.mp4"),
-            person_image=Path("person.png"),
-            scene_image=Path("scene.jpg"),
+            reference_images=(Path("reference-1.png"), Path("reference-2.png")),
             target_locale="ar-SA",
         )
         self.assertEqual(spec.input_video, Path("source.mp4"))
-        self.assertEqual(spec.person_image, Path("person.png"))
-        self.assertEqual(spec.scene_image, Path("scene.jpg"))
+        self.assertEqual(
+            spec.reference_images,
+            (Path("reference-1.png"), Path("reference-2.png")),
+        )
         self.assertEqual(locale_from_code(spec.target_locale).region, "Gulf")
 
-    def test_prompt_mentions_region_and_available_reference_roles(self) -> None:
+    def test_job_spec_rejects_more_than_nine_reference_images(self) -> None:
+        with self.assertRaisesRegex(ValueError, "参考图最多上传 9 张"):
+            JobSpec(
+                input_video=Path("source.mp4"),
+                reference_images=tuple(
+                    Path(f"reference-{index}.png")
+                    for index in range(MINIMAX_MAX_REFERENCE_IMAGES + 1)
+                ),
+                target_locale="ar-SA",
+            )
+
+    def test_reference_images_can_be_added_across_multiple_selections(self) -> None:
+        initial = (Path("first.png"),)
+        result = append_reference_images(
+            initial,
+            (Path("second.png"), Path("third.png"), Path("first.png")),
+        )
+        self.assertEqual(
+            result,
+            (Path("first.png"), Path("second.png"), Path("third.png")),
+        )
+        with self.assertRaisesRegex(ValueError, "最多添加 9 张"):
+            append_reference_images(
+                result,
+                tuple(Path(f"image-{index}.png") for index in range(7)),
+            )
+
+    def test_prompt_requires_full_scene_and_text_localization(self) -> None:
         locale = locale_from_code("ar-SA")
         self.assertIsNotNone(locale)
         prompt = build_context_ir_prompt(
             locale,
-            has_person_image=True,
-            has_scene_image=True,
+            has_reference_images=True,
         )
         self.assertIn("Gulf（Arabic）", prompt)
-        self.assertIn("人物参考图", prompt)
-        self.assertIn("场景参考图", prompt)
+        self.assertIn("本地化硬性验收规则", prompt)
+        self.assertIn("逐镜头将所有可见环境重建", prompt)
+        self.assertIn("每一处可辨识的文字都必须使用「Arabic」", prompt)
+        self.assertIn("不得保留或生成源语言文字、拉丁字母招牌", prompt)
+        self.assertIn("只替换人物、服装或对白", prompt)
+        self.assertIn("原始视频是动作、位置和镜头的唯一依据", prompt)
+        self.assertIn("全部参考图仅用于人物、服装、材质、色彩与整体美术的外观风格参考", prompt)
+        self.assertIn("绝不能复制或推断其中的动作、姿势、人物位置", prompt)
+        self.assertIn("必须完全以原始视频为准", prompt)
+        self.assertIn(
+            f"不得超过 {MAX_CONTEXT_IR_ANALYSIS_CHARS} 个字符",
+            prompt,
+        )
+
+    def test_generation_prompt_restores_hard_rules_after_context_ir(self) -> None:
+        locale = locale_from_code("ar-SA")
+        self.assertIsNotNone(locale)
+        prompt = build_generation_prompt(locale, "Context-IR returned analysis")
+        self.assertIn("Context-IR returned analysis", prompt)
+        self.assertIn("无论上述分析如何表述", prompt)
+        self.assertIn("本地化优先级高于复刻源视频的背景外观", prompt)
+        self.assertIn("不得保留或生成源语言文字、拉丁字母招牌", prompt)
+        self.assertIn("原始视频是动作、人物与物体位置", prompt)
+
+    def test_generation_prompt_rejects_overlong_context_ir_without_truncation(self) -> None:
+        locale = locale_from_code("ar-SA")
+        self.assertIsNotNone(locale)
+        analysis = "镜头分析" * (MAX_CONTEXT_IR_ANALYSIS_CHARS + 1)
+        with self.assertRaisesRegex(
+            ValidationError,
+            f"结构提示词超过 {MAX_CONTEXT_IR_ANALYSIS_CHARS} 字符限制，请重试",
+        ):
+            build_generation_prompt(locale, analysis)
+
+    def test_maximum_length_context_ir_leaves_room_for_hard_rules(self) -> None:
+        locale = locale_from_code("ar-SA")
+        self.assertIsNotNone(locale)
+        prompt = build_generation_prompt(locale, "镜头" * (MAX_CONTEXT_IR_ANALYSIS_CHARS // 2))
+        self.assertLessEqual(len(prompt), MAX_H3_PROMPT_CHARS)
 
     def test_settings_store_keeps_only_the_key(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -82,24 +154,40 @@ class ConfigAndUiContractTests(unittest.TestCase):
         settings_source = (
             Path(__file__).resolve().parents[1] / "ui" / "settings.py"
         ).read_text(encoding="utf-8")
-        for label in ("开始处理", "打开输出目录", "人物图", "场景图", "目标地区"):
+        for label in ("开始处理", "打开输出目录", "参考图（可选）", "目标地区"):
             self.assertIn(label, source)
         self.assertIn('textvariable=self.status_var', source)
         self.assertIn('状态：', source)
+        self.assertIn('text="Finjix 钟丰骏制作"', source)
+        self.assertIn('geometry("760x290")', source)
+        self.assertIn('minsize(700, 280)', source)
+        self.assertIn("root.rowconfigure(5, weight=1)", source)
+        self.assertIn("text=\"Finjix 钟丰骏制作\"", source)
+        self.assertIn("row=7, column=0, columnspan=4", source)
+        self.assertIn("row=0, column=1, columnspan=3", source)
         self.assertNotIn("Progressbar", source)
         self.assertNotIn("progress_var", source)
         self.assertNotIn("LabelFrame", source)
         self.assertNotIn('text="输出"', source)
         self.assertNotIn("output_var", source)
-        self.assertIn("row=5, column=1", source)
-        self.assertIn("row=5, column=2", source)
-        self.assertIn("self.settings.grid(row=4", source)
+        self.assertIn("row=4, column=1", source)
+        self.assertIn("row=4, column=2", source)
+        self.assertIn("self.settings.grid(row=3", source)
+        self.assertIn("askopenfilenames", source)
+        self.assertIn("MINIMAX_MAX_REFERENCE_IMAGES", source)
+        self.assertIn('button_text="添加"', source)
+        self.assertIn("append_reference_images", source)
+        self.assertIn('text="拼接视频"', source)
+        self.assertIn('text="清除"', source)
+        self.assertIn("_clear_video", source)
+        self.assertIn("_clear_reference_images", source)
+        self.assertIn("ConcatenateWindow", source)
+        self.assertIn("column=3", source)
         self.assertIn('text="目标地区"', source)
         self.assertIn('text="MiniMax API Key"', settings_source)
         self.assertNotIn("LabelFrame", settings_source)
         for removed in (
             "append_segment",
-            "concat_videos",
             "history",
             "实时日志",
             "task ID",

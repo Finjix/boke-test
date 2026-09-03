@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 import subprocess
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -143,6 +145,84 @@ def normalize_video(
     command.extend(["-movflags", "+faststart", str(temporary)])
     try:
         _run(command, timeout=timeout)
+        return _finish_atomic(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _concat_file_line(path: Path) -> str:
+    normalized = str(path.resolve()).replace("\\", "/")
+    escaped = normalized.replace("'", "'\\''")
+    return f"file '{escaped}'"
+
+
+def concatenate_videos(
+    sources: Sequence[Path],
+    destination: Path,
+    *,
+    ffmpeg_bin: str | None = None,
+    timeout: float = 600.0,
+) -> Path:
+    """Concatenate local videos in the supplied order into an MP4 file."""
+
+    source_paths = tuple(Path(source).expanduser() for source in sources)
+    if len(source_paths) < 2:
+        raise ValidationError("至少选择 2 个视频")
+    missing = next((path for path in source_paths if not path.is_file()), None)
+    if missing is not None:
+        raise ValidationError(f"视频不存在: {missing}")
+
+    destination = Path(destination).expanduser()
+    destination_resolved = destination.resolve()
+    if any(path.resolve() == destination_resolved for path in source_paths):
+        raise ValidationError("输出文件不能覆盖输入视频")
+    if timeout <= 0:
+        raise ValidationError("拼接超时配置无效")
+
+    ffmpeg = resolve_ffmpeg_bin(ffmpeg_bin=ffmpeg_bin)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = _temporary_path(destination)
+    try:
+        with tempfile.TemporaryDirectory(prefix="concat-") as directory:
+            list_path = Path(directory) / "inputs.txt"
+            list_path.write_text(
+                "\n".join(_concat_file_line(path) for path in source_paths) + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            command = [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(list_path),
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a:0?",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-ar",
+                "48000",
+                "-ac",
+                "2",
+                "-movflags",
+                "+faststart",
+                str(temporary),
+            ]
+            _run(command, timeout=timeout)
         return _finish_atomic(temporary, destination)
     finally:
         temporary.unlink(missing_ok=True)
