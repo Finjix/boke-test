@@ -1836,6 +1836,7 @@ class H3VideoLocalizationPipeline:
             context,
             index,
             current_reference_count=len(reference_shots),
+            current_reference_shot_ids={shot.shot_id for shot in reference_shots},
         )
         reference_map = self._reference_shot_map_with_segment_continuity(
             reference_shots,
@@ -3165,10 +3166,14 @@ class H3VideoLocalizationPipeline:
         start_ms: int,
         end_ms: int,
     ) -> list[SeedreamReference]:
+        # A storyboard image belongs to the segment containing its keyframe.
+        # Interval-overlap selection can leak a boundary shot into two
+        # segments, then send it once as the current shot and again as
+        # continuity, which encourages H3 to duplicate its subjects.
         return [
             reference
             for reference in context.seedream_references
-            if reference.end_ms > start_ms and reference.start_ms < end_ms
+            if start_ms <= reference.keyframe_ms < end_ms
         ]
 
     @staticmethod
@@ -3209,6 +3214,7 @@ class H3VideoLocalizationPipeline:
         segment_index: int,
         *,
         current_reference_count: int,
+        current_reference_shot_ids: set[str] | None = None,
     ) -> tuple[list[SeedreamReference], int]:
         """Select prior-slice storyboard refs that fit H3's image limit."""
 
@@ -3225,10 +3231,11 @@ class H3VideoLocalizationPipeline:
                 ]
             )
         )
+        excluded_ids = current_reference_shot_ids or set()
         candidates = [
             reference
             for reference in context.seedream_references
-            if reference.shot_id in candidate_ids
+            if reference.shot_id in candidate_ids and reference.shot_id not in excluded_ids
         ]
         available_slots = max(H3_MAX_IMAGES - current_reference_count, 0)
         selected = candidates[-available_slots:] if available_slots else []
