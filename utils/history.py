@@ -14,7 +14,7 @@ from utils.errors import ValidationError
 
 
 HISTORY_INDEX_VERSION = 1
-HISTORY_PIPELINE_VERSION = 5
+HISTORY_PIPELINE_VERSION = 7
 _JOB_ID = re.compile(r"^[^\\/:*?\"<>|]+$")
 
 
@@ -228,6 +228,33 @@ class HistoryStore:
     def _status_from_context(context: JobContext) -> str:
         latest_node = context.node_executions[-1] if context.node_executions else None
         if context.provider == "minimax_h3":
+            latest_doubao = next(
+                (item for item in reversed(context.node_executions) if item.node == "doubao"),
+                None,
+            )
+            package_ready = HistoryStore._active_doubao_package_ready(context)
+            if context.stage == PipelineStage.WAITING_FOR_APPROVAL:
+                return "waiting_for_approval" if package_ready else "analysis_interrupted"
+            if context.stage == PipelineStage.ANALYZING:
+                if latest_doubao and latest_doubao.status == NodeExecutionStatus.RUNNING:
+                    return "doubao_running"
+                if (
+                    latest_doubao
+                    and latest_doubao.status == NodeExecutionStatus.COMPLETED
+                    and package_ready
+                ):
+                    return "doubao_ready"
+                return "analysis_interrupted"
+            if context.stage == PipelineStage.GENERATING_REFERENCES:
+                latest_seedream = next(
+                    (item for item in reversed(context.node_executions) if item.node == "seedream"),
+                    None,
+                )
+                if latest_seedream and latest_seedream.status == NodeExecutionStatus.RUNNING:
+                    return "seedream_running"
+                return "seedream_interrupted"
+            if context.stage == PipelineStage.WAITING_FOR_REFERENCE_APPROVAL:
+                return "waiting_for_reference_approval"
             if context.stage == PipelineStage.WAITING_FOR_SEGMENTS:
                 return "waiting_for_segments"
             if context.stage == PipelineStage.WAITING_FOR_NEXT_SEGMENT:
@@ -237,6 +264,20 @@ class HistoryStore:
                     return "h3_running" if latest_node.task_id else "h3_interrupted"
                 return "h3_interrupted"
             if context.stage == PipelineStage.FAILED:
+                latest_seedream = next(
+                    (item for item in reversed(context.node_executions) if item.node == "seedream"),
+                    None,
+                )
+                if latest_seedream and latest_seedream.status == NodeExecutionStatus.FAILED:
+                    return "seedream_failed"
+                if latest_seedream and latest_seedream.status == NodeExecutionStatus.RUNNING:
+                    return "seedream_interrupted"
+                if (
+                    latest_doubao
+                    and latest_doubao.status == NodeExecutionStatus.FAILED
+                    and (latest_node is latest_doubao or not context.h3_segments)
+                ):
+                    return "doubao_failed"
                 if (
                     latest_node
                     and latest_node.status == NodeExecutionStatus.RUNNING
@@ -308,6 +349,40 @@ class HistoryStore:
         ):
             return "analysis_interrupted"
         return context.stage.value
+
+    @staticmethod
+    def _active_doubao_package_ready(context: JobContext) -> bool:
+        package_value = context.artifacts.get("localization_package")
+        package_path = (
+            Path(package_value)
+            if package_value
+            else context.job_dir / "json" / "localization_package.json"
+        )
+        if not package_path.is_absolute():
+            package_path = context.job_dir / package_path
+        prompt_value = context.artifacts.get("doubao_h3_prompt")
+        prompt_path = (
+            Path(prompt_value)
+            if prompt_value
+            else context.job_dir / "json" / "doubao_h3_prompt.txt"
+        )
+        if not prompt_path.is_absolute():
+            prompt_path = context.job_dir / prompt_path
+        if not package_path.is_file() or not prompt_path.is_file():
+            return False
+        try:
+            package = read_json(package_path)
+            prompt = prompt_path.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError, TypeError, ValueError):
+            return False
+        return (
+            isinstance(package, dict)
+            and isinstance(package.get("h3_prompt"), str)
+            and bool(package["h3_prompt"].strip())
+            and isinstance(package.get("reference_shots"), list)
+            and bool(package["reference_shots"])
+            and package["h3_prompt"].strip() == prompt
+        )
 
     def _incompatible_entry(
         self,

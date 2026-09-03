@@ -66,12 +66,44 @@ H3_NATIVE_LANGUAGE_CODES = frozenset(
 
 
 def is_h3_native_language(language_code: str) -> bool:
-    return language_code.strip().casefold() in H3_NATIVE_LANGUAGE_CODES
+    # H3_TARGET_LOCALES is built before the alias table below is initialized;
+    # use the code path during module initialization and the canonical alias
+    # path for all later callers.
+    canonicalizer = globals().get("canonical_language_code")
+    normalized = (
+        canonicalizer(language_code)
+        if callable(canonicalizer)
+        else language_code.strip().casefold()
+    )
+    return normalized in H3_NATIVE_LANGUAGE_CODES
 
 
 H3_TARGET_LOCALES: tuple[TargetLocale, ...] = tuple(
     item for item in TARGET_LOCALES if is_h3_native_language(item.language_code)
 )
+
+
+# Doubao may return either the ISO language code requested by the job (for
+# example ``ar``) or the human-readable language name used by the GUI (for
+# example ``Arabic``). Keep the comparison in one place so every provider
+# path accepts both forms without weakening unrelated target validation.
+LANGUAGE_CODE_ALIASES: dict[str, str] = {}
+for _locale in TARGET_LOCALES:
+    LANGUAGE_CODE_ALIASES[_locale.language.casefold()] = _locale.language_code.casefold()
+    LANGUAGE_CODE_ALIASES[_locale.language_code.casefold()] = _locale.language_code.casefold()
+
+
+def canonical_language_code(value: str) -> str:
+    """Return the configured ISO code for a language name or code."""
+
+    normalized = " ".join(value.strip().casefold().split())
+    return LANGUAGE_CODE_ALIASES.get(normalized, normalized)
+
+
+def language_values_match(left: str, right: str) -> bool:
+    """Compare language names and ISO codes as equivalent values."""
+
+    return canonical_language_code(left) == canonical_language_code(right)
 
 
 def locale_from_label(label: str) -> TargetLocale | None:

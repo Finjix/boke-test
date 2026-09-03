@@ -198,6 +198,55 @@ def extract_uniform_frames(
     return results
 
 
+def extract_frame_at(
+    source: Path,
+    destination: Path,
+    *,
+    timestamp_seconds: float,
+    ffprobe_bin: str = "ffprobe",
+    ffmpeg_bin: str | None = None,
+    timeout: float = 300.0,
+) -> Path:
+    """Extract one deterministic PNG frame at a source-video timestamp."""
+
+    source = Path(source)
+    destination = Path(destination)
+    if timestamp_seconds < 0 or not math.isfinite(timestamp_seconds):
+        raise ValidationError("frame timestamp must be finite and non-negative")
+    info = ffprobe.probe(source, ffprobe_bin=ffprobe_bin, timeout=min(timeout, 120.0))
+    if not info.has_video:
+        raise ValidationError("source video must contain a video stream")
+    timestamp = min(max(0.0, timestamp_seconds), max(0.0, info.duration - 0.05))
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    ffmpeg = ffmpeg_bin or resolve_ffmpeg_bin(ffprobe_bin)
+    temporary = _temporary_path(destination)
+    command = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-ss",
+        f"{timestamp:.3f}",
+        "-i",
+        str(source),
+        "-frames:v",
+        "1",
+        "-an",
+        "-f",
+        "image2",
+        str(temporary),
+    ]
+    try:
+        _run(command, timeout=timeout)
+        return _finish_atomic(temporary, destination)
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def _concat_manifest(sources: list[Path], manifest: Path) -> None:
     lines = ["ffconcat version 1.0"]
     for source in sources:

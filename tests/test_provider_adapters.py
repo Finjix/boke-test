@@ -10,7 +10,12 @@ from api.common import ApiResponse
 from api.minimax import MiniMaxClient, task_video_url
 from api.seedance import SeedanceClient
 from api.uguu import UguuClient
-from config import AppConfig, FIXED_DOUBAO_MODEL, FIXED_MINIMAX_H3_MODEL
+from config import (
+    AppConfig,
+    FIXED_DOUBAO_MODEL,
+    FIXED_MINIMAX_H3_MODEL,
+    FIXED_SEEDREAM_MODEL,
+)
 from core.localization import analyze_video
 from utils.errors import ProviderError
 
@@ -135,6 +140,65 @@ class ProviderAdapterTests(unittest.TestCase):
         )
         self.assertIn("Validation error", client.calls[1][0][1]["content"][1]["text"])
         self.assertEqual(result.dialogues[0].target_text, "مرحبا")
+
+    def test_seedream_uses_fixed_image_edit_model_and_persists_raw_response(self) -> None:
+        session = FakeSession(
+            [
+                FakeResponse(
+                    {
+                        "data": [{"url": "https://cdn.example/seedream.png"}],
+                        "request_id": "seedream-provider-request",
+                    }
+                )
+            ]
+        )
+        client = ArkClient(self.config, session=session)
+        with tempfile.TemporaryDirectory() as directory:
+            response = client.generate_image(
+                ["https://uguu.se/source-frame.png"],
+                "Replace the complete background while preserving composition.",
+                stage="seedream_shot_001_attempt_1",
+                raw_dir=Path(directory),
+            )
+            raw_files = list(Path(directory).glob("*.json"))
+
+        payload = session.posts[0]["json"]
+        self.assertEqual(payload["model"], FIXED_SEEDREAM_MODEL)
+        self.assertEqual(payload["image"], "https://uguu.se/source-frame.png")
+        self.assertEqual(payload["size"], "2K")
+        self.assertFalse(payload["watermark"])
+        self.assertEqual(response.request_id, "seedream-provider-request")
+        self.assertEqual(len(raw_files), 1)
+
+    def test_seedream_serializes_previous_reference_as_second_input(self) -> None:
+        session = FakeSession(
+            [
+                FakeResponse(
+                    {
+                        "data": [{"url": "https://cdn.example/seedream-continuity.png"}],
+                        "request_id": "seedream-continuity-request",
+                    }
+                )
+            ]
+        )
+        client = ArkClient(self.config, session=session)
+        client.generate_image(
+            [
+                "https://uguu.se/current-keyframe.png",
+                "https://uguu.se/previous-seedream.png",
+            ],
+            "Keep the current shot composition and use the previous image for continuity.",
+        )
+
+        payload = session.posts[0]["json"]
+        self.assertEqual(
+            payload["image"],
+            [
+                "https://uguu.se/current-keyframe.png",
+                "https://uguu.se/previous-seedream.png",
+            ],
+        )
+        self.assertEqual(payload["model"], FIXED_SEEDREAM_MODEL)
 
     def test_seedance_enables_native_audio_generation(self) -> None:
         session = FakeSession([FakeResponse({"id": "task-1"})])

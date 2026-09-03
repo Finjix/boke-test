@@ -22,6 +22,10 @@ from video_config import SEEDANCE_MAX_DURATION, SEEDANCE_TASK_TIMEOUT
 
 
 FIXED_DOUBAO_MODEL = "doubao-seed-2-0-lite-260428"
+FIXED_SEEDREAM_MODEL = "doubao-seedream-5-0-pro-260628"
+# Seedream storyboard references use the lowest currently accepted 2K size;
+# they are continuity aids, not final-resolution delivery assets.
+FIXED_SEEDREAM_SIZE = "2K"
 FIXED_MINIMAX_H3_MODEL = "MiniMax-H3"
 MINIMAX_CN_BASE_URL = "https://api.minimax.cn"
 MINIMAX_H3_DEFAULT_RESOLUTION = "768P"
@@ -86,6 +90,7 @@ class AppConfig:
     ark_api_key: str = ""
     ark_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
     doubao_model: str = FIXED_DOUBAO_MODEL
+    seedream_model: str = FIXED_SEEDREAM_MODEL
     minimax_api_key: str = ""
     minimax_base_url: str = MINIMAX_CN_BASE_URL
     minimax_model: str = FIXED_MINIMAX_H3_MODEL
@@ -112,6 +117,7 @@ class AppConfig:
             "AppConfig("
             f"ark_base_url={self.ark_base_url!r}, "
             f"doubao_model={self.doubao_model!r}, "
+            f"seedream_model={self.seedream_model!r}, "
             f"minimax_base_url={self.minimax_base_url!r}, "
             f"minimax_model={self.minimax_model!r}, "
             f"minimax_task_timeout={self.minimax_task_timeout!r}, "
@@ -154,6 +160,7 @@ class AppConfig:
                 "https://ark.cn-beijing.volces.com/api/v3",
             ).rstrip("/"),
             doubao_model=_text(source, "DOUBAO_MODEL", FIXED_DOUBAO_MODEL),
+            seedream_model=FIXED_SEEDREAM_MODEL,
             minimax_api_key=_text(source, "MINIMAX_API_KEY"),
             minimax_base_url=_text(
                 source,
@@ -195,6 +202,10 @@ class AppConfig:
     def validate_values(self) -> None:
         if self.doubao_model != FIXED_DOUBAO_MODEL:
             raise ConfigurationError(f"DOUBAO_MODEL is fixed to {FIXED_DOUBAO_MODEL}")
+        if self.seedream_model != FIXED_SEEDREAM_MODEL:
+            raise ConfigurationError(
+                f"SEEDREAM_MODEL is fixed to {FIXED_SEEDREAM_MODEL}"
+            )
         if not self.ark_base_url.startswith(("http://", "https://")):
             raise ConfigurationError("ARK_BASE_URL must be an HTTP(S) URL")
         if self.minimax_model != FIXED_MINIMAX_H3_MODEL:
@@ -248,4 +259,9 @@ class AppConfig:
     def missing_h3_runtime_values(self) -> list[str]:
         """Return credentials required by the active MiniMax H3 workflow."""
 
-        return ["MINIMAX_API_KEY"] if not self.minimax_api_key else []
+        missing: list[str] = []
+        if not self.ark_api_key:
+            missing.append("ARK_API_KEY")
+        if not self.minimax_api_key:
+            missing.append("MINIMAX_API_KEY")
+        return missing

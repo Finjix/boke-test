@@ -25,6 +25,61 @@ class FakeProvider:
 
 
 class PreflightTests(unittest.TestCase):
+    def test_active_h3_preflight_requires_doubao_and_minimax_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "input.mp4"
+            source.write_bytes(b"video")
+            config = AppConfig(
+                ffprobe_bin=sys.executable,
+                work_dir=Path(directory) / "work",
+            )
+            report = run_preflight(
+                config,
+                _spec(source),
+                clients={
+                    "ark": FakeProvider(),
+                    "minimax_h3": FakeProvider(),
+                    "uguu": FakeProvider(),
+                },
+                execute_remote_checks=False,
+            )
+            self.assertFalse(report.passed)
+            failed = {check.name for check in report.checks if not check.passed}
+            self.assertIn("ARK_API_KEY", failed)
+            self.assertIn("MINIMAX_API_KEY", failed)
+
+            configured = AppConfig(
+                ark_api_key="ark",
+                minimax_api_key="h3",
+                ffprobe_bin=sys.executable,
+                work_dir=Path(directory) / "work-configured",
+            )
+            passed = run_preflight(
+                configured,
+                _spec(source),
+                clients={
+                    "ark": FakeProvider(),
+                    "minimax_h3": FakeProvider(),
+                    "uguu": FakeProvider(),
+                },
+                execute_remote_checks=False,
+            )
+            self.assertTrue(passed.passed)
+
+    def test_ark_only_client_selects_active_h3_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "input.mp4"
+            source.write_bytes(b"video")
+            report = run_preflight(
+                AppConfig(ffprobe_bin=sys.executable, work_dir=Path(directory) / "work"),
+                _spec(source),
+                clients={"ark": FakeProvider()},
+                execute_remote_checks=False,
+            )
+            names = {check.name for check in report.checks}
+            self.assertIn("MINIMAX_API_KEY", names)
+            self.assertNotIn("SEEDANCE_MODEL_ID", names)
+
     def test_static_preflight_reports_missing_runtime_dependency_and_key(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "input.mp4"

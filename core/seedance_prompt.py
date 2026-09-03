@@ -6,6 +6,7 @@ import json
 from collections.abc import Iterable
 
 from core.models import JobSpec, LocalizationPackage, UploadedAsset
+from language_config import language_values_match
 from utils.errors import ValidationError
 
 
@@ -33,7 +34,7 @@ def _package_prompt_data(package: LocalizationPackage) -> dict[str, object]:
 def build_seedance_prompt(package: LocalizationPackage, job: JobSpec) -> str:
     """Render the model-generated localization plan into one Seedance prompt."""
 
-    if package.target_language.casefold() != job.target_language.casefold():
+    if not language_values_match(package.target_language, job.target_language):
         raise ValidationError("localization package language does not match the job")
     if package.target_region.casefold() != job.target_region.casefold():
         raise ValidationError("localization package region does not match the job")

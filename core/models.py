@@ -5,9 +5,11 @@ from __future__ import annotations
 from enum import Enum
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
+
+from language_config import canonical_language_code
 
 
 class PipelineStage(str, Enum):
@@ -19,6 +21,8 @@ class PipelineStage(str, Enum):
     WAITING_FOR_NEXT_SEGMENT = "waiting_for_next_segment"
     ANALYZING = "analyzing"
     WAITING_FOR_APPROVAL = "waiting_for_approval"
+    GENERATING_REFERENCES = "generating_references"
+    WAITING_FOR_REFERENCE_APPROVAL = "waiting_for_reference_approval"
     WAITING_FOR_SEGMENT_APPROVAL = "waiting_for_segment_approval"
     GENERATING_VIDEO = "generating_video"
     COMPLETED = "completed"
@@ -65,6 +69,7 @@ class NodeExecution(StrictModel):
     status: NodeExecutionStatus
     provider: str = ""
     segment_index: StrictInt | None = None
+    shot_id: str | None = None
     started_at: str
     finished_at: str | None = None
     request_ids: list[str] = Field(default_factory=list)
@@ -166,8 +171,68 @@ class LocalizationDialogue(StrictModel):
         return self
 
 
+class LocalizationReferenceShot(StrictModel):
+    """One shot that Doubao says needs a generated Seedream reference."""
+
+    shot_id: str
+    start_ms: StrictInt
+    end_ms: StrictInt
+    keyframe_ms: StrictInt
+    character_ids: list[str] = Field(default_factory=list)
+    continuity_group: str = ""
+    scene_description: str
+    replacement_requirements: list[str] = Field(default_factory=list)
+    preserve_requirements: list[str] = Field(default_factory=list)
+    seedream_prompt: str
+
+    @field_validator(
+        "shot_id",
+        "continuity_group",
+        "scene_description",
+        "seedream_prompt",
+    )
+    @classmethod
+    def normalize_reference_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("reference shot text cannot be empty")
+        return value
+
+    @field_validator("character_ids", "replacement_requirements", "preserve_requirements")
+    @classmethod
+    def normalize_reference_lists(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for item in value:
+            item = item.strip()
+            if not item:
+                raise ValueError("reference shot lists cannot contain empty text")
+            normalized.append(item)
+        return normalized
+
+    @field_validator("start_ms", "end_ms", "keyframe_ms")
+    @classmethod
+    def non_negative_reference_timestamp(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("reference shot timestamps must be non-negative")
+        return value
+
+    @model_validator(mode="after")
+    def validate_reference_interval(self) -> "LocalizationReferenceShot":
+        if self.end_ms <= self.start_ms:
+            raise ValueError("reference shot end_ms must be greater than start_ms")
+        if not self.start_ms <= self.keyframe_ms < self.end_ms:
+            raise ValueError("reference shot keyframe_ms must be inside the shot interval")
+        return self
+
+
 class LocalizationPackage(StrictModel):
-    """The complete planning contract passed from Doubao to Seedance."""
+    """The complete planning contract passed from Doubao to the video generator."""
+
+    # This is the provider limit for the complete H3 text field.  The active
+    # Doubao validator also builds the final deterministic prompt around this
+    # plan and rejects it when the assembled request would exceed the same
+    # limit; nothing is truncated.
+    MAX_H3_PROMPT_CHARS: ClassVar[int] = 7000
 
     source: dict[str, Any]
     target: dict[str, Any]
@@ -176,6 +241,22 @@ class LocalizationPackage(StrictModel):
     dialogues: list[LocalizationDialogue]
     visual_localization: dict[str, Any]
     cultural_requirements: list[str]
+    reference_shots: list[LocalizationReferenceShot] = Field(default_factory=list)
+    h3_prompt: str | None = None
+
+    @field_validator("h3_prompt")
+    @classmethod
+    def normalize_h3_prompt(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("h3_prompt cannot be empty")
+        if len(value) > cls.MAX_H3_PROMPT_CHARS:
+            raise ValueError(
+                f"h3_prompt cannot exceed {cls.MAX_H3_PROMPT_CHARS} characters"
+            )
+        return value
 
     @field_validator("cultural_requirements")
     @classmethod
@@ -251,6 +332,18 @@ class LocalizationPackage(StrictModel):
                     raise ValueError("dialogues contain an abnormally large overlap")
         return self
 
+    @model_validator(mode="after")
+    def validate_reference_shot_ids(self) -> "LocalizationPackage":
+        shot_ids = [shot.shot_id for shot in self.reference_shots]
+        if len(shot_ids) != len(set(shot_ids)):
+            raise ValueError("reference shot IDs must be unique")
+        previous_start = -1
+        for shot in self.reference_shots:
+            if shot.start_ms < previous_start:
+                raise ValueError("reference shots must be sorted by start_ms")
+            previous_start = shot.start_ms
+        return self
+
     @property
     def source_language(self) -> str:
         return str(self.source["language"])
@@ -295,9 +388,10 @@ class JobSpec(StrictModel):
     @field_validator("target_language")
     @classmethod
     def standard_language_code(cls, value: str) -> str:
-        if not re.fullmatch(r"[A-Za-z]{2,3}", value):
-            raise ValueError("target_language must be a standard language code")
-        return value.casefold()
+        canonical = canonical_language_code(value)
+        if not re.fullmatch(r"[A-Za-z]{2,3}", canonical):
+            raise ValueError("target_language must be a standard language code or language name")
+        return canonical
 
     @field_validator("target_locale")
     @classmethod
@@ -368,9 +462,12 @@ class H3Segment(StrictModel):
     normalized_duration_seconds: StrictInt
     prompt: str
     source_artifact: str
+    source_start_ms: StrictInt | None = None
+    source_end_ms: StrictInt | None = None
     status: str = "pending"
     source_asset: UploadedAsset | None = None
     reference_assets: list[UploadedAsset] = Field(default_factory=list)
+    reference_shot_ids: list[str] = Field(default_factory=list)
     original_frame_assets: list[UploadedAsset] = Field(default_factory=list)
     previous_output_asset: UploadedAsset | None = None
     reference_strategy: str = "user_images"
@@ -410,10 +507,82 @@ class H3Segment(StrictModel):
         return self
 
 
+class SeedreamAttempt(StrictModel):
+    """One persisted Seedream image-generation attempt for a storyboard shot."""
+
+    attempt: StrictInt
+    status: NodeExecutionStatus
+    started_at: str
+    finished_at: str | None = None
+    request_id: str | None = None
+    request_artifact: str | None = None
+    raw_response_artifact: str | None = None
+    response_artifact: str | None = None
+    source_frame_artifact: str | None = None
+    source_frame_asset: UploadedAsset | None = None
+    continuity_reference_shot_id: str | None = None
+    continuity_reference_artifact: str | None = None
+    provider_output_artifact: str | None = None
+    output_artifact: str | None = None
+    failure_artifact: str | None = None
+    error: dict[str, Any] | None = None
+
+    @field_validator("attempt")
+    @classmethod
+    def positive_attempt(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("Seedream attempt must be positive")
+        return value
+
+
+class SeedreamReference(StrictModel):
+    """Persisted state for one generated storyboard reference image."""
+
+    shot_id: str
+    start_ms: StrictInt
+    end_ms: StrictInt
+    keyframe_ms: StrictInt
+    continuity_group: str
+    prompt: str
+    source_frame_artifact: str
+    source_frame_asset: UploadedAsset | None = None
+    reference_asset: UploadedAsset | None = None
+    status: str = "pending"
+    attempts: list[SeedreamAttempt] = Field(default_factory=list)
+    active_attempt: StrictInt | None = None
+    output_artifact: str | None = None
+    stale_reason: str | None = None
+
+    @field_validator("shot_id", "continuity_group", "prompt", "source_frame_artifact")
+    @classmethod
+    def non_empty_seedream_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Seedream reference fields cannot be empty")
+        return value
+
+    @field_validator("start_ms", "end_ms", "keyframe_ms")
+    @classmethod
+    def non_negative_seedream_timestamp(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("Seedream reference timestamps must be non-negative")
+        return value
+
+    @model_validator(mode="after")
+    def validate_seedream_reference(self) -> "SeedreamReference":
+        if self.end_ms <= self.start_ms:
+            raise ValueError("Seedream reference end_ms must be greater than start_ms")
+        if not self.start_ms <= self.keyframe_ms < self.end_ms:
+            raise ValueError("Seedream reference keyframe_ms must be inside the shot interval")
+        if self.status not in {"pending", "running", "completed", "failed", "stale"}:
+            raise ValueError(f"Unsupported Seedream reference status: {self.status}")
+        return self
+
+
 class JobContext(StrictModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
-    pipeline_version: int = 5
+    pipeline_version: int = 7
     job_id: str
     job_dir: Path
     spec: JobSpec
@@ -430,6 +599,7 @@ class JobContext(StrictModel):
     request_ids: dict[str, str] = Field(default_factory=dict)
     retry_counts: dict[str, int] = Field(default_factory=dict)
     node_executions: list[NodeExecution] = Field(default_factory=list)
+    seedream_references: list["SeedreamReference"] = Field(default_factory=list)
     h3_segments: list[H3Segment] = Field(default_factory=list)
     source_master_duration_seconds: float | None = None
     source_master_artifact: str | None = None

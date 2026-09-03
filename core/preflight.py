@@ -9,7 +9,7 @@ from typing import Any
 from api.minimax import MiniMaxClient
 from api.seedance import SeedanceClient
 from api.uguu import UguuClient
-from config import AppConfig, FIXED_DOUBAO_MODEL
+from config import AppConfig, FIXED_DOUBAO_MODEL, FIXED_SEEDREAM_MODEL
 from core.models import JobSpec, PreflightCheck, PreflightReport
 from language_config import is_h3_native_language
 from utils.errors import PreflightError
@@ -132,13 +132,18 @@ def run_preflight(
     execute_remote_checks: bool = True,
 ) -> PreflightReport:
     clients = clients or {}
-    if "minimax_h3" in clients or "h3" in clients or (
-        not clients.get("seedance") and bool(config.minimax_api_key)
-    ):
+    active_h3_requested = (
+        "minimax_h3" in clients
+        or "h3" in clients
+        or ("ark" in clients and "seedance" not in clients)
+        or (not clients.get("seedance") and bool(config.minimax_api_key))
+    )
+    if active_h3_requested:
         return run_h3_preflight(
             config,
             spec,
             job_dir=job_dir,
+            ark_client=clients.get("ark"),
             minimax_client=clients.get("minimax_h3") or clients.get("h3"),
             uguu_client=clients.get("uguu"),
             logger=logger,
@@ -162,6 +167,7 @@ def run_h3_preflight(
     spec: JobSpec,
     *,
     job_dir: Path | None = None,
+    ark_client: Any | None = None,
     minimax_client: Any | None = None,
     uguu_client: Any | None = None,
     logger: JobLogger | None = None,
@@ -180,6 +186,26 @@ def run_h3_preflight(
         "ffprobe",
         _executable(config.ffprobe_bin),
         str(config.ffprobe_bin),
+    )
+    add(
+        "ARK_API_KEY",
+        bool(config.ark_api_key),
+        "configured" if config.ark_api_key else "missing",
+    )
+    add(
+        "DOUBAO_MODEL",
+        config.doubao_model == FIXED_DOUBAO_MODEL,
+        config.doubao_model,
+    )
+    add(
+        "SEEDREAM_MODEL",
+        config.seedream_model == FIXED_SEEDREAM_MODEL,
+        config.seedream_model,
+    )
+    add(
+        "ARK_BASE_URL",
+        config.ark_base_url.startswith(("http://", "https://")),
+        config.ark_base_url,
     )
     add(
         "MINIMAX_API_KEY",
@@ -202,23 +228,21 @@ def run_h3_preflight(
         spec.target_language,
     )
 
-    references = [*spec.reference_images, *spec.character_refs, *spec.scene_refs]
-    add(
-        "reference image count",
-        len(references) <= 9,
-        f"{len(references)} / 9",
-    )
-    for path in [spec.input_video, *references]:
+    # v7 never accepts user-supplied reference images.  Doubao selects the
+    # storyboard keyframes and Seedream creates the target references after
+    # the first approval, so the only input media to preflight is the source
+    # master video.
+    for path in [spec.input_video]:
         path = Path(path)
         exists = path.is_file()
         add(f"input:{path.name}", exists, "available" if exists else "file does not exist")
         if exists:
-            limit = 50 * 1024 * 1024 if path == Path(spec.input_video) else 30 * 1024 * 1024
+            limit = config.uguu_max_file_mib * 1024 * 1024
             within = path.stat().st_size <= limit
             add(
                 f"size:{path.name}",
                 within,
-                "within H3 input limit" if within else f"larger than {limit // (1024 * 1024)} MiB",
+                "within Uguu input limit" if within else f"larger than {limit // (1024 * 1024)} MiB",
             )
 
     work_dir = Path(job_dir or config.work_dir)
@@ -244,6 +268,16 @@ def run_h3_preflight(
             add("MiniMax H3 configuration", True, "configuration check passed")
         except Exception as exc:  # noqa: BLE001 - surfaced as a check
             add("MiniMax H3 configuration", False, str(exc))
+        # Ark has no non-generating probe in this application.  The fixed
+        # models, endpoint and credential checks above gate the first paid
+        # analysis/image calls without issuing a throwaway completion request.
+        add(
+            "Doubao / Seedream endpoint",
+            ark_client is not None or bool(config.ark_api_key),
+            "deferred to the persisted Doubao or Seedream call"
+            if ark_client is not None or config.ark_api_key
+            else "Ark client or API key is not configured",
+        )
 
     return PreflightReport(
         passed=all(check.passed for check in checks if check.fatal),

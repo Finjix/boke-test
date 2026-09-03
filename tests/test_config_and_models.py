@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from config import AppConfig, FIXED_DOUBAO_MODEL
+from config import AppConfig, FIXED_DOUBAO_MODEL, FIXED_SEEDREAM_MODEL
 from core.models import (
     JobSpec,
     LocalizationDialogue,
@@ -63,9 +63,20 @@ class ConfigAndModelsTests(unittest.TestCase):
         )
         self.assertEqual(config.missing_runtime_values(), ["ARK_API_KEY", "SEEDANCE_MODEL_ID"])
 
+    def test_active_h3_runtime_values_require_both_analysis_and_generation_keys(self) -> None:
+        config = AppConfig()
+        self.assertEqual(
+            config.missing_h3_runtime_values(), ["ARK_API_KEY", "MINIMAX_API_KEY"]
+        )
+        configured = AppConfig(ark_api_key="ark", minimax_api_key="h3")
+        self.assertEqual(configured.missing_h3_runtime_values(), [])
+
     def test_model_id_is_fixed(self) -> None:
         with self.assertRaises(ConfigurationError):
             AppConfig.from_env({"DOUBAO_MODEL": "another-model"}, load_file=False)
+        self.assertEqual(FIXED_SEEDREAM_MODEL, "doubao-seedream-5-0-pro-260628")
+        with self.assertRaises(ConfigurationError):
+            AppConfig(seedream_model="another-model").validate_values()
 
     def test_target_catalog_has_required_first_phase_languages(self) -> None:
         labels = [locale.label for locale in TARGET_LOCALES]
@@ -102,13 +113,13 @@ class ConfigAndModelsTests(unittest.TestCase):
         self.assertNotIn("source_asr_language", JobSpec.model_fields)
 
     def test_job_spec_uses_language_code_and_bcp47_locale(self) -> None:
-        with self.assertRaises(ValueError):
-            JobSpec(
-                input_video="input.mp4",
-                target_language="Arabic",
-                target_region="Gulf",
-                target_locale="ar-SA",
-            )
+        named = JobSpec(
+            input_video="input.mp4",
+            target_language="Arabic",
+            target_region="Gulf",
+            target_locale="ar-SA",
+        )
+        self.assertEqual(named.target_language, "ar")
         with self.assertRaises(ValueError):
             JobSpec(
                 input_video="input.mp4",

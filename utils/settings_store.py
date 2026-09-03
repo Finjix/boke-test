@@ -21,6 +21,9 @@ H3_SETTING_NAMES = (
     "minimax_api_key",
 )
 PREFERENCE_NAMES = (
+    # Historical key retained so existing installations keep their choice;
+    # the active v7 UI interprets it as automatic continuation through
+    # Doubao, Seedream and H3.
     "auto_continue_to_seedance",
 )
 

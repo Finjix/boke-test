@@ -1548,14 +1548,14 @@ class VideoLocalizationPipeline:
 
 
 # Keep the v4 implementation available for its existing checkpoint format and
-# compatibility tests. New callers without explicitly injected legacy clients
-# use the H3 implementation below; old Ark/Seedance injections remain isolated.
+# compatibility tests. New callers use the Doubao+H3 implementation below;
+# explicitly injected Seedance clients remain isolated on the legacy path.
 LegacyVideoLocalizationPipeline = VideoLocalizationPipeline
 from core.h3_pipeline import H3VideoLocalizationPipeline
 
 
 class VideoLocalizationPipeline:
-    """Facade with MiniMax H3 as the active provider."""
+    """Facade with Doubao analysis and MiniMax H3 as the active workflow."""
 
     def __init__(
         self,
@@ -1571,7 +1571,7 @@ class VideoLocalizationPipeline:
         history_store: HistoryStore | None = None,
         ffmpeg_bin: str | None = None,
     ) -> None:
-        if ark_client is not None or seedance_client is not None:
+        if seedance_client is not None:
             self._impl = LegacyVideoLocalizationPipeline(
                 config,
                 ark_client=ark_client,
@@ -1585,6 +1585,7 @@ class VideoLocalizationPipeline:
             self._impl = H3VideoLocalizationPipeline(
                 config,
                 minimax_client=minimax_client or h3_client,
+                ark_client=ark_client,
                 uguu_client=uguu_client,
                 event_callback=event_callback,
                 cancel_event=cancel_event,
