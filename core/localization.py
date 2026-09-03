@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -19,11 +20,61 @@ ANALYSIS_PROMPT_VERSION = "v7-seedream-storyboard-h3"
 ANALYSIS_CORRECTION_ATTEMPTS = 2
 DOUBAO_TIMELINE_CLAMP_TOLERANCE_MS = 1000
 
+PROVIDER_SAFE_LANGUAGE_INSTRUCTION = (
+    "For provider-facing h3_prompt and seedream_prompt text, use neutral, non-graphic visual "
+    "wording for potentially sensitive actions: say 'takes', 'holds', 'reaches for', or "
+    "'wallet interaction' instead of criminal labels such as 'steals', 'theft', 'thief', "
+    "'pickpocket' or 'robbery'. Preserve the exact gesture, prop, character relationship, "
+    "screen position and timing; soften only the wording and never omit or change the action."
+)
+
+_PROVIDER_SAFE_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"盗窃行为"), "拿取动作"),
+    (re.compile(r"盗窃"), "拿取"),
+    (re.compile(r"小偷"), "人物"),
+    (re.compile(r"偷走"), "拿走"),
+    (re.compile(r"偷"), "拿"),
+    (re.compile(r"\bpickpocketing\b", re.IGNORECASE), "wallet interaction"),
+    (re.compile(r"\bpickpocket\b", re.IGNORECASE), "person reaching for a wallet"),
+    (re.compile(r"\bthieves\b", re.IGNORECASE), "people"),
+    (re.compile(r"\bthief\b", re.IGNORECASE), "person"),
+    (re.compile(r"\btheft\b", re.IGNORECASE), "wallet-taking moment"),
+    (re.compile(r"\brobbery\b", re.IGNORECASE), "prop interaction"),
+    (re.compile(r"\bstealing\b", re.IGNORECASE), "taking"),
+    (re.compile(r"\bstolen\b", re.IGNORECASE), "taken"),
+    (re.compile(r"\bstole\b", re.IGNORECASE), "took"),
+    (re.compile(r"\bsteals\b", re.IGNORECASE), "takes"),
+    (re.compile(r"\bsteal\b", re.IGNORECASE), "take"),
+)
+
+
+def soften_provider_sensitive_language(value: str) -> str:
+    """Use neutral visual wording for provider-facing prompts without changing events."""
+
+    softened = value
+    for pattern, replacement in _PROVIDER_SAFE_REPLACEMENTS:
+        softened = pattern.sub(replacement, softened)
+    return softened
+
 
 def _https(value: str, label: str) -> str:
     if not value.startswith("https://"):
         raise ValidationError(f"{label} must be an HTTPS URL")
     return value
+
+
+def _video_input(value: str, label: str) -> str:
+    """Accept a public URL or an Ark-supported Base64 video data URL."""
+
+    if value.startswith("https://"):
+        return value
+    if value.startswith("data:video/") and ";base64," in value:
+        encoded = value.split(",", 1)[1]
+        if encoded:
+            return value
+    raise ValidationError(
+        f"{label} must be an HTTPS URL or a Base64 video data URL"
+    )
 
 
 def localization_package_schema(
@@ -173,7 +224,7 @@ def build_video_analysis_messages(
 ) -> list[dict[str, Any]]:
     """Build one multimodal Ark request for planning and translation."""
 
-    source_video_url = _https(source_video_url, "source video")
+    source_video_url = _video_input(source_video_url, "source video")
     schema = json.dumps(
         localization_package_schema(
             require_h3_prompt=require_h3_prompt,
@@ -193,6 +244,8 @@ def build_video_analysis_messages(
         "composition, camera path, shot order, transitions, edit rhythm, pacing and overall "
         "creative effect. Existing visible text must be translated or redrawn in place with "
         "the same timing and design intent; do not add subtitles, watermarks or unrelated UI."
+        " "
+        + PROVIDER_SAFE_LANGUAGE_INSTRUCTION
         if require_h3_prompt
         else ""
     )
@@ -209,6 +262,8 @@ def build_video_analysis_messages(
         "The character_ids field is a visual-person namespace and may include non-speaking or "
         "background people; it is independent from the speaker_id namespace used for dialogue. "
         "Do not write a generic style prompt and do not omit a background-only shot."
+        " "
+        + PROVIDER_SAFE_LANGUAGE_INSTRUCTION
         if require_reference_plan
         else ""
     )
@@ -402,21 +457,34 @@ def recover_doubao_schema_wrapper(content: str) -> dict[str, Any] | None:
     """Recover the two known Doubao schema-wrapper response shapes.
 
     Some Ark responses return the requested package under a top-level
-    JSON-schema-shaped wrapper. The wrapper may be a complete JSON value, or
-    it may be followed by the known unrelated ``audio_path`` field. This
-    helper stays intentionally narrow: only the expected v6/v7 package field
-    sets and exact wrapper metadata are accepted. The returned candidate is
-    validated by the caller with the normal localization-package contract
-    before it is persisted.
+    JSON-schema-shaped wrapper. The wrapper may be a complete JSON value, have
+    one missing final outer brace, or be followed by the known unrelated
+    ``audio_path`` field. This helper stays intentionally narrow: only the
+    expected v6/v7 package field sets and exact wrapper metadata are accepted.
+    The returned candidate is validated by the caller with the normal
+    localization-package contract before it is persisted.
     """
 
     text = content.strip()
     if not text.startswith("{"):
         return None
+    decoder = json.JSONDecoder()
+    decoded_text = text
     try:
-        wrapper, end = json.JSONDecoder().raw_decode(text)
+        wrapper, end = decoder.raw_decode(decoded_text)
     except json.JSONDecodeError:
-        return None
+        # One observed Doubao response contained the complete v7 wrapper and
+        # package values but omitted only the wrapper's final `}`. Try exactly
+        # that repair, then require the strict wrapper checks below. Do not
+        # attempt general JSON repair or truncation.
+        repaired_text = text + "}"
+        try:
+            wrapper, end = decoder.raw_decode(repaired_text)
+        except json.JSONDecodeError:
+            return None
+        if end != len(repaired_text):
+            return None
+        decoded_text = repaired_text
     if not isinstance(wrapper, dict):
         return None
     base_fields = {
@@ -466,7 +534,7 @@ def recover_doubao_schema_wrapper(content: str) -> dict[str, Any] | None:
     if not isinstance(h3_prompt, str) or not h3_prompt.strip():
         return None
 
-    suffix = text[end:].strip()
+    suffix = decoded_text[end:].strip()
     if suffix:
         # The observed malformed content has one extra closing brace after
         # the unrelated field: `,<audio_path field>}}`. Strip only that

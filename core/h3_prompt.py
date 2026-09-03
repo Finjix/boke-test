@@ -45,6 +45,7 @@ def build_transformation_prompt(
     segment_index: int = 1,
     total_segments: int | None = None,
     has_previous_generated_reference: bool = False,
+    has_previous_segment_references: bool = False,
     has_original_frame_references: bool = False,
     has_seedream_references: bool = False,
     reference_shot_map: Iterable[str] = (),
@@ -77,6 +78,14 @@ def build_transformation_prompt(
         "Uniform frames from the original master are supplied as additional identity and "
         "scene references; do not turn them into a slideshow."
         if has_original_frame_references
+        else ""
+    )
+    previous_segment_note = (
+        "Images labeled as previous-segment continuity references come from the preceding uploaded "
+        "H3 slice. Use them as global anchors for the localized people, wardrobe, environment, "
+        "architecture, props and visible text; use the current slice and its matching storyboard "
+        "images as the authority for current-shot composition, action and timing."
+        if has_previous_segment_references
         else ""
     )
     seedream_note = (
@@ -144,6 +153,7 @@ def build_transformation_prompt(
             "localized appearance and environment. Do not treat them as a replacement source "
             "video and do not copy unrelated subjects, poses or compositions.",
             continuity,
+            previous_segment_note,
             frame_note,
             seedream_note,
             "Render natural spoken audio in the target language when speech is present, using "
@@ -176,6 +186,7 @@ def build_h3_content(
     *,
     previous_video_url: str | None = None,
     reference_assets: Iterable[Any] = (),
+    continuity_reference_assets: Iterable[Any] = (),
     original_frame_assets: Iterable[Any] = (),
     continuity_image_url: str | None = None,
 ) -> list[dict[str, Any]]:
@@ -209,7 +220,11 @@ def build_h3_content(
             }
         )
 
-    image_values = list(reference_assets) + list(original_frame_assets)
+    image_values = (
+        list(reference_assets)
+        + list(continuity_reference_assets)
+        + list(original_frame_assets)
+    )
     if continuity_image_url:
         image_values.append(continuity_image_url)
     if len(image_values) > H3_MAX_IMAGES:

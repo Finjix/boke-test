@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from api.ark import ArkClient
+from api.ark import ArkClient, encode_video_as_data_url
 from api.common import ApiResponse
 from api.minimax import MiniMaxClient, task_video_url
 from api.seedance import SeedanceClient
@@ -15,6 +15,7 @@ from config import (
     FIXED_DOUBAO_MODEL,
     FIXED_MINIMAX_H3_MODEL,
     FIXED_SEEDREAM_MODEL,
+    SEEDREAM_MAX_INPUT_IMAGES,
 )
 from core.localization import analyze_video
 from utils.errors import ProviderError
@@ -104,6 +105,17 @@ class ProviderAdapterTests(unittest.TestCase):
         self.assertEqual(payload["response_format"], {"type": "json_object"})
         self.assertEqual(payload["messages"][1]["content"][0]["type"], "video_url")
         self.assertEqual(ArkClient.extract_text(response), "{\"ok\":true}")
+
+    def test_local_video_can_be_encoded_as_ark_base64_data_url(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "input.mp4"
+            source.write_bytes(b"fake-mp4-bytes")
+            data_url, metadata = encode_video_as_data_url(source)
+
+        self.assertTrue(data_url.startswith("data:video/mp4;base64,"))
+        self.assertEqual(metadata["mode"], "base64")
+        self.assertEqual(metadata["byte_size"], len(b"fake-mp4-bytes"))
+        self.assertNotIn("fake-mp4-bytes", data_url)
 
     def test_analysis_retries_same_model_once_with_validation_error(self) -> None:
         class FakeArk:
@@ -199,6 +211,18 @@ class ProviderAdapterTests(unittest.TestCase):
             ],
         )
         self.assertEqual(payload["model"], FIXED_SEEDREAM_MODEL)
+
+    def test_seedream_rejects_more_than_provider_input_limit(self) -> None:
+        client = ArkClient(self.config, session=FakeSession([]))
+        with self.assertRaises(ProviderError) as raised:
+            client.generate_image(
+                [
+                    f"https://uguu.se/reference-{index}.png"
+                    for index in range(SEEDREAM_MAX_INPUT_IMAGES + 1)
+                ],
+                "Keep the current composition and localize the scene.",
+            )
+        self.assertEqual(raised.exception.error_code, "IMAGE_LIMIT_EXCEEDED")
 
     def test_seedance_enables_native_audio_generation(self) -> None:
         session = FakeSession([FakeResponse({"id": "task-1"})])

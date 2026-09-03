@@ -19,15 +19,30 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from api.ark import ArkClient, extract_image_url
+from api.ark import ArkClient, encode_video_as_data_url, extract_image_url
 from api.minimax import MiniMaxClient, task_video_url
 from api.uguu import UguuClient
-from config import AppConfig, FIXED_SEEDREAM_MODEL, FIXED_SEEDREAM_SIZE
-from core.h3_prompt import H3_PROMPT_VERSION, build_h3_content, build_transformation_prompt
+from config import (
+    AppConfig,
+    DOUBAO_BASE64_MAX_REQUEST_MIB,
+    DOUBAO_BASE64_MAX_VIDEO_MIB,
+    FIXED_SEEDREAM_MODEL,
+    FIXED_SEEDREAM_SIZE,
+    PRE_H3_MAX_RETRIES,
+    PRE_H3_RETRY_INTERVAL_SECONDS,
+    SEEDREAM_MAX_INPUT_IMAGES,
+)
+from core.h3_prompt import (
+    H3_MAX_IMAGES,
+    H3_PROMPT_VERSION,
+    build_h3_content,
+    build_transformation_prompt,
+)
 from core.localization import (
     ANALYSIS_PROMPT_VERSION,
     analyze_video,
     recover_doubao_schema_wrapper,
+    soften_provider_sensitive_language,
     validate_localization_package,
 )
 from core.models import (
@@ -64,6 +79,7 @@ from utils.errors import (
     ValidationError,
     VideoLocalizerError,
 )
+from utils.json_parser import parse_strict_json
 from utils.history import HistoryStore
 from utils.ids import new_job_id
 from utils.logger import JobLogger
@@ -81,6 +97,7 @@ DOUBAO_PROVIDER = "doubao"
 DOUBAO_NODE = "doubao"
 SEEDREAM_PROVIDER = "seedream"
 SEEDREAM_NODE = "seedream"
+SEEDREAM_OUTPUT_SENSITIVE_ERROR = "outputimagesensitivecontentdetected"
 H3_ACTIVE_STATUSES = {"queued", "running", "processing"}
 H3_TERMINAL_ERROR_CODES = {
     "FAILED",
@@ -186,7 +203,11 @@ class H3VideoLocalizationPipeline:
 
             if not skip_preflight:
                 self._run_and_require_preflight(context, spec)
-            self._run_doubao_analysis(context, info.duration)
+            self._run_pre_h3_with_retries(
+                context,
+                operation_name="doubao",
+                operation=lambda: self._run_doubao_analysis(context, info.duration),
+            )
             if context.execution_mode == ExecutionMode.MANUAL:
                 return self._pause_for_doubao_approval(context)
             return self._continue_after_doubao(context)
@@ -273,22 +294,38 @@ class H3VideoLocalizationPipeline:
                     context,
                     reference.shot_id,
                 )
+        if self._soften_seedream_reference_prompts(context):
+            self._write_seedream_reference_manifest(context)
         self._save_checkpoint(context)
         target = self._select_seedream_reference(context, shot_id)
         if target.status == "completed":
             raise ValidationError(
                 f"Seedream 参考图 {target.shot_id} 已完成且有效，无需重复生成"
             )
+        if self._revise_sensitive_prompt_before_retry(context, target):
+            self._write_seedream_reference_manifest(context)
+            self._save_checkpoint(context)
         self._invalidate_following_seedream_references(context, target.shot_id)
         self._write_seedream_reference_manifest(context)
         self._save_checkpoint(context)
         context.last_error = None
-        try:
-            self._run_seedream_reference(context, target)
+
+        def retry_operation() -> None:
+            self._set_stage(context, PipelineStage.GENERATING_REFERENCES)
             self._run_pending_seedream_references(context)
             if all(item.status == "completed" for item in context.seedream_references):
-                return self._pause_for_seedream_approval(context)
+                return
             raise ValidationError("仍有 Seedream 参考图未完成")
+
+        try:
+            self._run_pre_h3_with_retries(
+                context,
+                operation_name="seedream",
+                operation=retry_operation,
+            )
+            if context.execution_mode == ExecutionMode.AUTO:
+                return self._continue_after_reference_generation(context)
+            return self._pause_for_seedream_approval(context)
         except PipelineCancelled as exc:
             self._handle_outer_error(context, exc)
             raise
@@ -365,7 +402,11 @@ class H3VideoLocalizationPipeline:
         context.approval_status = ApprovalStatus.NOT_REQUIRED
         try:
             duration = self._source_master_duration(context)
-            self._run_doubao_analysis(context, duration)
+            self._run_pre_h3_with_retries(
+                context,
+                operation_name="doubao",
+                operation=lambda: self._run_doubao_analysis(context, duration),
+            )
             if context.execution_mode == ExecutionMode.MANUAL:
                 return self._pause_for_doubao_approval(context)
             return self._continue_after_doubao(context)
@@ -387,7 +428,11 @@ class H3VideoLocalizationPipeline:
         """Generate Seedream references after the Doubao plan is approved."""
 
         self._load_analysis_package(context)
-        self._run_seedream_references(context)
+        self._run_pre_h3_with_retries(
+            context,
+            operation_name="seedream",
+            operation=lambda: self._run_seedream_references(context),
+        )
         if context.execution_mode == ExecutionMode.MANUAL:
             return self._pause_for_seedream_approval(context)
         return self._continue_after_reference_generation(context)
@@ -440,6 +485,58 @@ class H3VideoLocalizationPipeline:
 
     _pause_for_approval = _pause_for_doubao_approval
 
+    def _run_pre_h3_with_retries(
+        self,
+        context: JobContext,
+        *,
+        operation_name: str,
+        operation: Callable[[], Any],
+    ) -> Any:
+        """Retry a failed Doubao/Seedream stage before H3 is allowed to start."""
+
+        stage = (
+            PipelineStage.ANALYZING
+            if operation_name == "doubao"
+            else PipelineStage.GENERATING_REFERENCES
+        )
+        retry_key = f"pre_h3_{operation_name}"
+        last_error: Exception | None = None
+        max_attempts = PRE_H3_MAX_RETRIES + 1
+        for attempt in range(1, max_attempts + 1):
+            try:
+                context.last_error = None
+                return operation()
+            except PipelineCancelled:
+                raise
+            except Exception as exc:  # noqa: BLE001 - pre-H3 recovery is deliberately broad
+                last_error = exc
+                context.retry_counts[retry_key] = attempt - 1
+                if self._is_seedream_sensitive_output_error(exc):
+                    # A moderation rejection needs a prompt revision, not
+                    # another paid request with the same blocked wording.
+                    # _run_seedream_reference already persisted the revision
+                    # evidence before this exception reaches here.
+                    raise
+                if attempt >= max_attempts:
+                    raise
+                record = self._error_record(stage, exc).as_dict()
+                context.last_error = record
+                self._save_checkpoint(context)
+                self._emit(
+                    context,
+                    "pre_h3_retry_scheduled",
+                    f"{operation_name} 在 H3 前置阶段失败，将在 {PRE_H3_RETRY_INTERVAL_SECONDS:g} 秒后第 {attempt + 1} 次尝试",
+                    operation=operation_name,
+                    failed_attempt=attempt,
+                    next_attempt=attempt + 1,
+                    retry_interval_seconds=PRE_H3_RETRY_INTERVAL_SECONDS,
+                    error=record,
+                )
+                if self.cancel_event.wait(PRE_H3_RETRY_INTERVAL_SECONDS):
+                    raise PipelineCancelled("Cancellation requested while waiting to retry")
+        assert last_error is not None
+        raise last_error
+
     def _pause_for_seedream_approval(self, context: JobContext) -> PipelineResult:
         """Persist all Seedream references and wait before creating H3."""
 
@@ -477,18 +574,21 @@ class H3VideoLocalizationPipeline:
         raw_dir = attempt_dir / "raw"
         raw_dir.mkdir(parents=True, exist_ok=True)
         try:
-            source_asset = self._ensure_asset(
+            source_input, source_input_metadata = self._doubao_video_input(
                 context,
-                None,
                 source,
-                kind="doubao_source_video",
             )
             source_asset_path = context.job_dir / "json" / "doubao_source_asset.json"
-            write_json(source_asset_path, source_asset.model_dump(mode="json"))
+            write_json(source_asset_path, source_input_metadata)
             self._set_artifact(context, "doubao_source_asset", source_asset_path)
+            source_input_path = attempt_dir / "video_input.json"
+            write_json(source_input_path, source_input_metadata)
+            if self._path_reference(context, source_input_path) not in node.input_artifacts:
+                node.input_artifacts.append(self._path_reference(context, source_input_path))
+            self._save_checkpoint(context)
             package = analyze_video(
                 self.ark_client,
-                source_asset.remote_url,
+                source_input,
                 target_language=context.spec.target_language,
                 target_region=context.spec.target_region,
                 target_locale=context.spec.target_locale,
@@ -524,6 +624,7 @@ class H3VideoLocalizationPipeline:
                 NodeExecutionStatus.COMPLETED,
                 output_artifacts=[
                     self._path_reference(context, source_asset_path),
+                    self._path_reference(context, source_input_path),
                     self._path_reference(context, attempt_package_path),
                     self._path_reference(context, attempt_prompt_path),
                     self._path_reference(context, package_path),
@@ -569,6 +670,9 @@ class H3VideoLocalizationPipeline:
             package = self._load_analysis_package(context)
             if not context.seedream_references:
                 context.seedream_references = self._prepare_seedream_references(context, package)
+                self._write_seedream_reference_manifest(context)
+                self._save_checkpoint(context)
+            elif self._soften_seedream_reference_prompts(context):
                 self._write_seedream_reference_manifest(context)
                 self._save_checkpoint(context)
             self._run_pending_seedream_references(context)
@@ -627,24 +731,38 @@ class H3VideoLocalizationPipeline:
             "object placement, depth and lighting direction"
         )
         characters = ", ".join(shot.character_ids) if shot.character_ids else "all visible people"
-        return "\n".join(
-            [
-                "Edit the supplied source keyframe into one target-region storyboard reference image.",
-                f"Target region: {context.spec.target_region}; target locale: {context.spec.target_locale}.",
-                f"Rebuild the appearance and wardrobe of {characters} for the target region, and replace {replacements}.",
-                f"Scene direction: {shot.scene_description}.",
-                f"Preserve exactly: {preserves}.",
-                f"Additional Seedream direction: {shot.seedream_prompt}",
-                "This is an image-edit operation, not a generic style transfer. The output must "
-                "contain the localized people and localized background together, with no source "
-                "facade, source-language signage, unintended subtitles, watermark or unrelated subject.",
-                "If a previous Seedream storyboard reference image is supplied as a second input, "
-                "use it as the continuity anchor for identity, wardrobe, scene design, architecture, "
-                "signage style, vehicles, props, color and lighting. Use the current source keyframe "
-                "as the authority for this shot's pose, framing, camera geography and object timing; "
-                "do not copy the previous image's pose or composition.",
-            ]
+        return soften_provider_sensitive_language(
+            "\n".join(
+                [
+                    "Edit the supplied source keyframe into one target-region storyboard reference image.",
+                    f"Target region: {context.spec.target_region}; target locale: {context.spec.target_locale}.",
+                    f"Rebuild the appearance and wardrobe of {characters} for the target region, and replace {replacements}.",
+                    f"Scene direction: {shot.scene_description}.",
+                    f"Preserve exactly: {preserves}.",
+                    f"Additional Seedream direction: {shot.seedream_prompt}",
+                    "This is an image-edit operation, not a generic style transfer. The output must "
+                    "contain the localized people and localized background together, with no source "
+                    "facade, source-language signage, unintended subtitles, watermark or unrelated subject.",
+                    "Input ordering is significant: image 1 is the current source keyframe; images 2 onward "
+                    "are all available previously generated Seedream storyboard references in chronological "
+                    "order, with the newest previous image last. Use every supplied previous image as a "
+                    "continuity anchor for identity, wardrobe, scene design, architecture, signage style, "
+                    "vehicles, props, color and lighting. Use the current source keyframe as the authority "
+                    "for this shot's pose, framing, camera geography and object timing; do not copy a previous "
+                    "image's pose or composition.",
+                ]
+            )
         )
+
+    @staticmethod
+    def _soften_seedream_reference_prompts(context: JobContext) -> bool:
+        changed = False
+        for reference in context.seedream_references:
+            softened = soften_provider_sensitive_language(reference.prompt)
+            if softened != reference.prompt:
+                reference.prompt = softened
+                changed = True
+        return changed
 
     def _run_pending_seedream_references(self, context: JobContext) -> None:
         for reference in context.seedream_references:
@@ -689,12 +807,12 @@ class H3VideoLocalizationPipeline:
                     "前序 Seedream 参考图已重新生成，需要按连续性链重生成"
                 )
 
-    def _previous_seedream_input(
+    def _previous_seedream_inputs(
         self,
         context: JobContext,
         reference: SeedreamReference,
-    ) -> tuple[SeedreamReference, Path, UploadedAsset] | None:
-        """Return the immediately previous generated image as a continuity input."""
+    ) -> tuple[list[tuple[SeedreamReference, Path, UploadedAsset]], int]:
+        """Return the newest preceding generated images that fit Seedream's input cap."""
 
         try:
             index = next(
@@ -707,30 +825,36 @@ class H3VideoLocalizationPipeline:
                 f"Seedream reference is not present in the storyboard: {reference.shot_id}"
             ) from exc
         if index == 0:
-            return None
+            return [], 0
 
-        previous = context.seedream_references[index - 1]
-        if previous.status != "completed":
-            raise ValidationError(
-                f"上一张 Seedream 参考图未完成，不能生成当前镜头: {reference.shot_id}"
+        previous_items = context.seedream_references[:index]
+        available_slots = max(SEEDREAM_MAX_INPUT_IMAGES - 1, 0)
+        selected_items = previous_items[-available_slots:] if available_slots else []
+        omitted = len(previous_items) - len(selected_items)
+        selected: list[tuple[SeedreamReference, Path, UploadedAsset]] = []
+        for previous in selected_items:
+            if previous.status != "completed":
+                raise ValidationError(
+                    f"前序 Seedream 参考图未完成，不能生成当前镜头: {reference.shot_id}"
+                )
+            previous_path = self._absolute_path(context, previous.output_artifact)
+            if previous_path is None or not previous_path.is_file():
+                raise ValidationError(
+                    f"前序 Seedream 参考图输出缺失: {previous.shot_id}"
+                )
+            inspect_image(previous_path)
+            previous_asset = self._ensure_asset(
+                context,
+                previous.reference_asset,
+                previous_path,
+                kind=f"seedream_shot_{previous.shot_id}_continuity_reference",
             )
-        previous_path = self._absolute_path(context, previous.output_artifact)
-        if previous_path is None or not previous_path.is_file():
-            raise ValidationError(
-                f"上一张 Seedream 参考图输出缺失: {previous.shot_id}"
-            )
-        inspect_image(previous_path)
-        previous_asset = self._ensure_asset(
-            context,
-            previous.reference_asset,
-            previous_path,
-            kind=f"seedream_shot_{previous.shot_id}_continuity_reference",
-        )
-        if previous.reference_asset != previous_asset:
-            previous.reference_asset = previous_asset
-            self._write_seedream_reference_manifest(context)
-            self._save_checkpoint(context)
-        return previous, previous_path, previous_asset
+            if previous.reference_asset != previous_asset:
+                previous.reference_asset = previous_asset
+                self._write_seedream_reference_manifest(context)
+                self._save_checkpoint(context)
+            selected.append((previous, previous_path, previous_asset))
+        return selected, omitted
 
     def _run_seedream_reference(
         self,
@@ -788,16 +912,23 @@ class H3VideoLocalizationPipeline:
             reference.source_frame_asset = source_asset
             attempt.source_frame_asset = source_asset
             image_urls = [source_asset.remote_url]
-            previous_input = self._previous_seedream_input(context, reference)
-            if previous_input is not None:
-                previous_reference, previous_path, previous_asset = previous_input
+            previous_inputs, omitted = self._previous_seedream_inputs(context, reference)
+            attempt.continuity_reference_limit = SEEDREAM_MAX_INPUT_IMAGES
+            attempt.continuity_references_omitted = omitted
+            for previous_reference, previous_path, previous_asset in previous_inputs:
                 image_urls.append(previous_asset.remote_url)
-                attempt.continuity_reference_shot_id = previous_reference.shot_id
+                previous_artifact = self._path_reference(context, previous_path)
+                attempt.continuity_reference_shot_ids.append(previous_reference.shot_id)
+                attempt.continuity_reference_artifacts.append(previous_artifact)
+                node.input_artifacts.append(previous_artifact)
+            if previous_inputs:
+                # Backward-compatible summary for v7 history readers.
+                latest_reference, latest_path, _ = previous_inputs[-1]
+                attempt.continuity_reference_shot_id = latest_reference.shot_id
                 attempt.continuity_reference_artifact = self._path_reference(
                     context,
-                    previous_path,
+                    latest_path,
                 )
-                node.input_artifacts.append(attempt.continuity_reference_artifact)
             self._save_checkpoint(context)
             request_artifact = attempt_dir / "request.json"
             request = {
@@ -908,6 +1039,15 @@ class H3VideoLocalizationPipeline:
                 output=attempt.output_artifact,
             )
         except Exception as exc:  # noqa: BLE001 - preserve paid image evidence
+            if self._is_seedream_sensitive_output_error(exc):
+                self._revise_sensitive_seedream_prompt(
+                    context,
+                    reference,
+                    attempt,
+                    node,
+                    attempt_dir,
+                    exc,
+                )
             if isinstance(exc, ProviderError):
                 request_id = exc.request_id or getattr(self.ark_client, "last_request_id", None)
                 if request_id:
@@ -969,6 +1109,193 @@ class H3VideoLocalizationPipeline:
                 error=record,
             )
             raise
+
+    @staticmethod
+    def _is_seedream_sensitive_output_error(exc: Exception) -> bool:
+        if not isinstance(exc, ProviderError):
+            return False
+        error_code = str(exc.error_code or "").replace("_", "").casefold()
+        return error_code == SEEDREAM_OUTPUT_SENSITIVE_ERROR
+
+    def _revise_sensitive_seedream_prompt(
+        self,
+        context: JobContext,
+        reference: SeedreamReference,
+        attempt: SeedreamAttempt,
+        node: NodeExecution,
+        attempt_dir: Path,
+        source_error: Exception,
+    ) -> bool:
+        """Ask Doubao to neutralize a sensitive Seedream prompt for retry.
+
+        The image attempt has already been rejected by the provider, so this
+        method only makes a text-model call and persists its complete evidence.
+        It never retries the paid image generation implicitly.
+        """
+
+        original_prompt = reference.prompt
+        revision_request = {
+            "task": "rewrite_seedream_prompt_for_provider_safety",
+            "provider_error_code": getattr(source_error, "error_code", None),
+            "original_prompt": original_prompt,
+            "requirements": [
+                "Keep every person, object, target-region localization, scene replacement, action, relationship, composition, camera geography and timing.",
+                "Use neutral, non-graphic visual wording and avoid criminal labels or graphic descriptions.",
+                "Do not remove, reverse, or invent an action; only change wording that can trigger an automated safety filter.",
+                "Return one complete provider-facing Seedream image-edit prompt, with no explanation.",
+            ],
+        }
+        request_path = attempt_dir / "prompt_revision_request.json"
+        write_json(request_path, revision_request)
+        attempt.prompt_revision_request_artifact = self._path_reference(context, request_path)
+        if attempt.prompt_revision_request_artifact not in node.output_artifacts:
+            node.output_artifacts.append(attempt.prompt_revision_request_artifact)
+        attempt.prompt_before_revision = original_prompt
+        self._save_checkpoint(context)
+
+        try:
+            self._ensure_clients()
+            response = self.ark_client.chat(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You revise provider-facing image-edit prompts. Rewrite only the wording "
+                            "needed to reduce an automated sensitive-content false positive. Preserve "
+                            "all visual facts, people, objects, actions, relationships, target-region "
+                            "changes, composition, camera geography, timing and continuity. Use neutral "
+                            "non-graphic language such as takes, holds, reaches for, or prop interaction. "
+                            "Return valid JSON only in the form {\"prompt\":\"...\"}."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            "Rewrite this Seedream prompt after the provider rejected the output for "
+                            "sensitive-content detection. Do not omit the action or any localization "
+                            "instruction.\n"
+                            f"Provider error code: {getattr(source_error, 'error_code', '')}\n"
+                            f"Original prompt:\n{original_prompt}"
+                        ),
+                    },
+                ],
+                stage=f"seedream_prompt_revision_{reference.shot_id}_attempt_{attempt.attempt}",
+                raw_dir=attempt_dir / "prompt_revision_raw",
+                response_format={"type": "json_object"},
+            )
+            request_id = getattr(response, "request_id", None) or getattr(
+                self.ark_client, "last_request_id", None
+            )
+            attempt.prompt_revision_request_id = str(request_id) if request_id else None
+            if request_id and str(request_id) not in node.request_ids:
+                node.request_ids.append(str(request_id))
+            raw_path = getattr(response, "raw_path", None)
+            if raw_path:
+                attempt.prompt_revision_raw_response_artifact = self._path_reference(
+                    context, Path(raw_path)
+                )
+                if attempt.prompt_revision_raw_response_artifact not in node.output_artifacts:
+                    node.output_artifacts.append(attempt.prompt_revision_raw_response_artifact)
+            response_path = attempt_dir / "prompt_revision_response.json"
+            response_data = response.data if hasattr(response, "data") else response
+            write_json(response_path, response_data)
+            attempt.prompt_revision_response_artifact = self._path_reference(
+                context, response_path
+            )
+            if attempt.prompt_revision_response_artifact not in node.output_artifacts:
+                node.output_artifacts.append(attempt.prompt_revision_response_artifact)
+            content = self.ark_client.extract_text(response)
+            candidate = parse_strict_json(
+                content,
+                description="Seedream sensitive-prompt revision response",
+            )
+            if not isinstance(candidate, dict) or not isinstance(candidate.get("prompt"), str):
+                raise ValidationError(
+                    "Doubao prompt revision response must contain a string prompt"
+                )
+            revised_prompt = candidate["prompt"].strip()
+            if len(revised_prompt) < 40:
+                raise ValidationError("Doubao prompt revision returned an implausibly short prompt")
+            revised_prompt = soften_provider_sensitive_language(revised_prompt)
+            reference.prompt = revised_prompt
+            attempt.prompt_after_revision = revised_prompt
+            self._write_seedream_reference_manifest(context)
+            self._save_checkpoint(context)
+            self._emit(
+                context,
+                "seedream_prompt_revised",
+                f"Seedream shot {reference.shot_id} prompt revised for provider safety",
+                shot_id=reference.shot_id,
+                attempt=attempt.attempt,
+                request_id=request_id,
+            )
+            return True
+        except Exception as revision_error:  # noqa: BLE001 - preserve original failure
+            failure_path = attempt_dir / "prompt_revision_failure.json"
+            write_json(
+                failure_path,
+                {
+                    "message": str(revision_error),
+                    "error_code": getattr(revision_error, "error_code", None),
+                    "original_prompt": original_prompt,
+                },
+            )
+            attempt.prompt_revision_failure_artifact = self._path_reference(
+                context, failure_path
+            )
+            if attempt.prompt_revision_failure_artifact not in node.output_artifacts:
+                node.output_artifacts.append(attempt.prompt_revision_failure_artifact)
+            self._save_checkpoint(context)
+            return False
+
+    def _revise_sensitive_prompt_before_retry(
+        self,
+        context: JobContext,
+        reference: SeedreamReference,
+    ) -> bool:
+        """Revise a known-sensitive failed attempt before its next image call."""
+
+        attempt = next(
+            (
+                item
+                for item in reversed(reference.attempts)
+                if item.status == NodeExecutionStatus.FAILED
+            ),
+            None,
+        )
+        if attempt is None or attempt.prompt_after_revision:
+            return False
+        error = attempt.error or {}
+        error_code = str(error.get("error_code") or "").replace("_", "").casefold()
+        if error_code != SEEDREAM_OUTPUT_SENSITIVE_ERROR:
+            return False
+        node = self._seedream_node_for_attempt(context, reference.shot_id, attempt.attempt)
+        if node is None:
+            raise ValidationError(
+                f"Seedream sensitive failure node is missing: {reference.shot_id}"
+            )
+        source_error = ProviderError(
+            str(error.get("message") or "Seedream output was blocked by sensitive-content detection"),
+            provider="seedream",
+            status_code=error.get("http_status"),
+            error_code=error.get("error_code"),
+            request_id=error.get("request_id"),
+            retryable=False,
+        )
+        attempt_dir = self._seedream_attempt_dir(context, reference, attempt)
+        revised = self._revise_sensitive_seedream_prompt(
+            context,
+            reference,
+            attempt,
+            node,
+            attempt_dir,
+            source_error,
+        )
+        if not revised:
+            raise ValidationError(
+                f"Seedream {reference.shot_id} 的敏感提示词修正失败，未发送新的生图请求"
+            )
+        return True
 
     def _recover_seedream_completion(self, context: JobContext) -> bool:
         """Promote locally complete synchronous image calls without new calls."""
@@ -1501,11 +1828,20 @@ class H3VideoLocalizationPipeline:
             raise ValidationError(
                 f"segment {index} has no matching Seedream storyboard reference"
             )
-        if len(reference_shots) > 9:
+        if len(reference_shots) > H3_MAX_IMAGES:
             raise ValidationError(
-                f"segment {index} covers {len(reference_shots)} shots; split it so H3 receives at most 9 reference images"
+                f"segment {index} covers {len(reference_shots)} shots; split it so H3 receives at most {H3_MAX_IMAGES} reference images"
             )
-        reference_map = self._reference_shot_map(reference_shots, source_start_ms)
+        continuity_shots, continuity_omitted = self._previous_segment_seedream_references(
+            context,
+            index,
+            current_reference_count=len(reference_shots),
+        )
+        reference_map = self._reference_shot_map_with_segment_continuity(
+            reference_shots,
+            continuity_shots,
+            source_start_ms,
+        )
         prompt = build_transformation_prompt(
             target_language=context.spec.target_language,
             target_region=context.spec.target_region,
@@ -1514,6 +1850,7 @@ class H3VideoLocalizationPipeline:
             localization_prompt=package.h3_prompt,
             segment_index=index,
             has_seedream_references=True,
+            has_previous_segment_references=bool(continuity_shots),
             reference_shot_map=reference_map,
         )
         segment = H3Segment(
@@ -1525,7 +1862,13 @@ class H3VideoLocalizationPipeline:
             source_start_ms=source_start_ms,
             source_end_ms=source_end_ms,
             reference_shot_ids=[shot.shot_id for shot in reference_shots],
-            reference_strategy="seedream_storyboard",
+            continuity_reference_shot_ids=[shot.shot_id for shot in continuity_shots],
+            continuity_references_omitted=continuity_omitted,
+            reference_strategy=(
+                "seedream_storyboard+previous_segment_continuity"
+                if continuity_shots
+                else "seedream_storyboard"
+            ),
             status="pending",
         )
         context.h3_segments.append(segment)
@@ -1547,6 +1890,7 @@ class H3VideoLocalizationPipeline:
             localization_prompt=package.h3_prompt,
             segment_index=segment.index,
             has_seedream_references=True,
+            has_previous_segment_references=bool(segment.continuity_reference_shot_ids),
             reference_shot_map=self._reference_shot_map_for_segment(context, segment),
         )
         context.metrics["h3_prompt_version"] = H3_PROMPT_VERSION
@@ -1653,6 +1997,12 @@ class H3VideoLocalizationPipeline:
         segment.source_asset = source_asset
         reference_assets = self._ensure_seedream_assets_for_segment(context, segment)
         segment.reference_assets = reference_assets
+        continuity_reference_assets = self._ensure_seedream_assets_for_shot_ids(
+            context,
+            segment.continuity_reference_shot_ids,
+            kind_suffix="previous_segment_continuity",
+        )
+        segment.continuity_reference_assets = continuity_reference_assets
 
         if attempt.attempt == 1:
             package = self._load_analysis_package(context)
@@ -1664,6 +2014,7 @@ class H3VideoLocalizationPipeline:
                 localization_prompt=package.h3_prompt,
                 segment_index=segment.index,
                 has_seedream_references=True,
+                has_previous_segment_references=bool(segment.continuity_reference_shot_ids),
                 reference_shot_map=self._reference_shot_map_for_segment(context, segment),
             )
         else:
@@ -1675,6 +2026,7 @@ class H3VideoLocalizationPipeline:
             source_asset.remote_url,
             prompt,
             reference_assets=reference_assets,
+            continuity_reference_assets=continuity_reference_assets,
         )
         attempt_dir = self._attempt_dir(context, segment, attempt)
         content_path = attempt_dir / "content.json"
@@ -1683,6 +2035,10 @@ class H3VideoLocalizationPipeline:
         attempt.input_artifacts = [
             self._path_reference(context, source_path),
             *[self._path_reference(context, asset.local_path) for asset in reference_assets],
+            *[
+                self._path_reference(context, asset.local_path)
+                for asset in continuity_reference_assets
+            ],
         ]
         node.input_artifacts = list(attempt.input_artifacts)
         node.output_artifacts.append(self._path_reference(context, content_path))
@@ -1945,6 +2301,70 @@ class H3VideoLocalizationPipeline:
 
     # ---------- assets and persistence ----------
 
+    def _doubao_video_input(
+        self,
+        context: JobContext,
+        source: Path,
+    ) -> tuple[str, dict[str, Any]]:
+        """Build the persisted input descriptor and multimodal video value.
+
+        Base64 is the default for the Doubao analysis node because it removes
+        the fragile public-upload dependency from the first provider call.
+        ``url`` remains available for large files or installations that need
+        the legacy Uguu path. H3/Seedream asset uploads are intentionally not
+        changed here because their provider contracts still consume URLs.
+        """
+
+        mode = self.config.doubao_video_input_mode.casefold()
+        if mode == "url":
+            source_asset = self._ensure_asset(
+                context,
+                None,
+                source,
+                kind="doubao_source_video",
+            )
+            return source_asset.remote_url, {
+                "mode": "url",
+                "asset": source_asset.model_dump(mode="json"),
+            }
+
+        try:
+            byte_size = source.stat().st_size
+        except OSError as exc:
+            raise ValidationError(f"Doubao source video cannot be inspected: {source}") from exc
+        max_video_bytes = DOUBAO_BASE64_MAX_VIDEO_MIB * 1024 * 1024
+        if byte_size > max_video_bytes:
+            raise ValidationError(
+                "Doubao Base64 video exceeds the provider's "
+                f"{DOUBAO_BASE64_MAX_VIDEO_MIB} MiB video limit"
+            )
+        # Base64 expands the media by 4/3. Reserve 256 KiB for the prompt,
+        # schema and JSON envelope before encoding so the request stays below
+        # Ark's documented 64 MiB body limit.
+        estimated_request_bytes = ((byte_size + 2) // 3) * 4 + 256 * 1024
+        if estimated_request_bytes > DOUBAO_BASE64_MAX_REQUEST_MIB * 1024 * 1024:
+            raise ValidationError(
+                "Doubao Base64 video plus request envelope exceeds the provider's "
+                f"{DOUBAO_BASE64_MAX_REQUEST_MIB} MiB request limit"
+            )
+        digest = hashlib.sha256()
+        try:
+            with source.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        except OSError as exc:
+            raise ValidationError(f"Doubao source video cannot be hashed: {source}") from exc
+        data_url, metadata = encode_video_as_data_url(source)
+        metadata.update(
+            {
+                "sha256": digest.hexdigest(),
+                "estimated_request_bytes": estimated_request_bytes,
+                "max_video_mib": DOUBAO_BASE64_MAX_VIDEO_MIB,
+                "max_request_mib": DOUBAO_BASE64_MAX_REQUEST_MIB,
+            }
+        )
+        return data_url, metadata
+
     def _ensure_clients(self) -> None:
         if self.ark_client is None:
             self.ark_client = ArkClient(self.config, logger=self._logger)
@@ -1978,8 +2398,21 @@ class H3VideoLocalizationPipeline:
     ) -> list[UploadedAsset]:
         if not segment.reference_shot_ids:
             raise ValidationError(f"segment {segment.index} has no Seedream reference IDs")
+        return self._ensure_seedream_assets_for_shot_ids(
+            context,
+            segment.reference_shot_ids,
+            kind_suffix="reference",
+        )
+
+    def _ensure_seedream_assets_for_shot_ids(
+        self,
+        context: JobContext,
+        shot_ids: list[str],
+        *,
+        kind_suffix: str,
+    ) -> list[UploadedAsset]:
         references: list[UploadedAsset] = []
-        for shot_id in segment.reference_shot_ids:
+        for shot_id in shot_ids:
             reference = next(
                 (item for item in context.seedream_references if item.shot_id == shot_id),
                 None,
@@ -1994,7 +2427,7 @@ class H3VideoLocalizationPipeline:
                 context,
                 reference.reference_asset,
                 output_path,
-                kind=f"seedream_shot_{shot_id}_reference",
+                kind=f"seedream_shot_{shot_id}_{kind_suffix}",
             )
             reference.reference_asset = asset
             references.append(asset)
@@ -2752,6 +3185,55 @@ class H3VideoLocalizationPipeline:
             for index, reference in enumerate(references, start=1)
         ]
 
+    @staticmethod
+    def _reference_shot_map_with_segment_continuity(
+        references: list[SeedreamReference],
+        continuity_references: list[SeedreamReference],
+        segment_start_ms: int,
+    ) -> list[str]:
+        result = H3VideoLocalizationPipeline._reference_shot_map(
+            references,
+            segment_start_ms,
+        )
+        offset = len(result) + 1
+        result.extend(
+            f"image {index} = previous-segment continuity shot {reference.shot_id}; "
+            "global identity, wardrobe, environment and visible-text anchor only"
+            for index, reference in enumerate(continuity_references, start=offset)
+        )
+        return result
+
+    def _previous_segment_seedream_references(
+        self,
+        context: JobContext,
+        segment_index: int,
+        *,
+        current_reference_count: int,
+    ) -> tuple[list[SeedreamReference], int]:
+        """Select prior-slice storyboard refs that fit H3's image limit."""
+
+        if segment_index <= 1:
+            return [], 0
+        previous = self._previous_segment(context, segment_index)
+        if previous is None or previous.status != "completed":
+            raise ValidationError("上一片 H3 输出未完成，不能建立片段连续性参考")
+        candidate_ids = list(
+            dict.fromkeys(
+                [
+                    *previous.reference_shot_ids,
+                    *previous.continuity_reference_shot_ids,
+                ]
+            )
+        )
+        candidates = [
+            reference
+            for reference in context.seedream_references
+            if reference.shot_id in candidate_ids
+        ]
+        available_slots = max(H3_MAX_IMAGES - current_reference_count, 0)
+        selected = candidates[-available_slots:] if available_slots else []
+        return selected, len(candidates) - len(selected)
+
     def _reference_shot_map_for_segment(
         self,
         context: JobContext,
@@ -2763,7 +3245,17 @@ class H3VideoLocalizationPipeline:
             for reference in context.seedream_references
             if reference.shot_id == shot_id
         ]
-        return self._reference_shot_map(references, segment.source_start_ms or 0)
+        continuity_references = [
+            reference
+            for shot_id in segment.continuity_reference_shot_ids
+            for reference in context.seedream_references
+            if reference.shot_id == shot_id
+        ]
+        return self._reference_shot_map_with_segment_continuity(
+            references,
+            continuity_references,
+            segment.source_start_ms or 0,
+        )
 
     @staticmethod
     def _select_segment(context: JobContext, index: int | None) -> H3Segment:

@@ -468,6 +468,9 @@ class H3Segment(StrictModel):
     source_asset: UploadedAsset | None = None
     reference_assets: list[UploadedAsset] = Field(default_factory=list)
     reference_shot_ids: list[str] = Field(default_factory=list)
+    continuity_reference_assets: list[UploadedAsset] = Field(default_factory=list)
+    continuity_reference_shot_ids: list[str] = Field(default_factory=list)
+    continuity_references_omitted: StrictInt = 0
     original_frame_assets: list[UploadedAsset] = Field(default_factory=list)
     previous_output_asset: UploadedAsset | None = None
     reference_strategy: str = "user_images"
@@ -520,10 +523,24 @@ class SeedreamAttempt(StrictModel):
     response_artifact: str | None = None
     source_frame_artifact: str | None = None
     source_frame_asset: UploadedAsset | None = None
+    # The singular fields are retained so v7 checkpoints and history readers
+    # remain loadable. New attempts use the ordered plural fields below; the
+    # singular values point to the newest selected continuity image.
     continuity_reference_shot_id: str | None = None
     continuity_reference_artifact: str | None = None
+    continuity_reference_shot_ids: list[str] = Field(default_factory=list)
+    continuity_reference_artifacts: list[str] = Field(default_factory=list)
+    continuity_reference_limit: StrictInt | None = None
+    continuity_references_omitted: StrictInt = 0
     provider_output_artifact: str | None = None
     output_artifact: str | None = None
+    prompt_revision_request_artifact: str | None = None
+    prompt_revision_request_id: str | None = None
+    prompt_revision_raw_response_artifact: str | None = None
+    prompt_revision_response_artifact: str | None = None
+    prompt_revision_failure_artifact: str | None = None
+    prompt_before_revision: str | None = None
+    prompt_after_revision: str | None = None
     failure_artifact: str | None = None
     error: dict[str, Any] | None = None
 

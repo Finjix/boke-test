@@ -333,6 +333,8 @@ class HistoryPanel(ttk.Frame):
                         f"      请求：{attempt.request_artifact or '-'}",
                         f"      连续性参考镜头：{attempt.continuity_reference_shot_id or '-'}",
                         f"      连续性参考图：{attempt.continuity_reference_artifact or '-'}",
+                        f"      全部连续性参考镜头：{', '.join(attempt.continuity_reference_shot_ids) or '-'}",
+                        f"      连续性参考图省略数：{attempt.continuity_references_omitted}",
                         f"      原始响应：{attempt.raw_response_artifact or '-'}",
                         f"      规范化响应：{attempt.response_artifact or '-'}",
                         f"      Provider 输出：{attempt.provider_output_artifact or '-'}",
@@ -356,6 +358,9 @@ class HistoryPanel(ttk.Frame):
                     f"  - segment {segment.index}: {segment.status}, "
                     f"原始 {segment.source_duration_seconds:.3f}s / H3 {segment.normalized_duration_seconds}s",
                     f"    参考策略：{segment.reference_strategy}",
+                    f"    当前分镜参考镜头：{', '.join(segment.reference_shot_ids) or '-'}",
+                    f"    前片连续性参考镜头：{', '.join(segment.continuity_reference_shot_ids) or '-'}",
+                    f"    前片连续性参考图省略数：{segment.continuity_references_omitted}",
                     f"    当前输出：{segment.output_artifact or '-'}",
                     "    提示词：",
                     f"      {segment.prompt}",

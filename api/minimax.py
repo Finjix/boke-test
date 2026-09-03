@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 
@@ -61,6 +62,11 @@ class MiniMaxClient:
     def __post_init__(self) -> None:
         if self.session is None:
             self.session = requests.Session()
+            # The configured domestic MiniMax endpoint is reachable directly
+            # on this host, while the inherited local proxy currently drops
+            # its HTTPS connection. Keep custom endpoints proxy-compatible.
+            if urlparse(self.base_url).hostname == "api.minimax.cn":
+                self.session.trust_env = False
 
     @property
     def base_url(self) -> str:

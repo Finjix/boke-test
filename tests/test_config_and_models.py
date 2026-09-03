@@ -48,6 +48,19 @@ class ConfigAndModelsTests(unittest.TestCase):
         self.assertEqual(config.work_dir, Path("D:/example/custom-work"))
         self.assertNotIn("secret-value", repr(config))
 
+    def test_doubao_video_input_mode_defaults_to_base64_and_accepts_url_compatibility(self) -> None:
+        self.assertEqual(AppConfig().doubao_video_input_mode, "base64")
+        config = AppConfig.from_env(
+            {"DOUBAO_VIDEO_INPUT_MODE": "URL"},
+            load_file=False,
+        )
+        self.assertEqual(config.doubao_video_input_mode, "url")
+        with self.assertRaises(ConfigurationError):
+            AppConfig.from_env(
+                {"DOUBAO_VIDEO_INPUT_MODE": "uguu"},
+                load_file=False,
+            )
+
     def test_retired_audio_and_ffmpeg_settings_are_not_runtime_fields(self) -> None:
         fields = AppConfig.__dataclass_fields__
         self.assertNotIn("seed_audio_api_key", fields)

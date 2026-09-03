@@ -26,6 +26,11 @@ from ui.settings import SettingsPanel
 from utils.history import HistoryStore
 
 
+DEFAULT_TRANSFORMATION_INSTRUCTION = (
+    "将人物和场景转化为目标地区版本，严格保持人物、场景、创意结构、镜头节奏和整体效果一致。"
+)
+
+
 class VideoLocalizerWindow(tk.Tk):
     def __init__(self, config: AppConfig):
         super().__init__()
@@ -67,7 +72,7 @@ class VideoLocalizerWindow(tk.Tk):
 
     def _build_current_tab(self, root: ttk.Frame) -> None:
         root.columnconfigure(1, weight=1)
-        root.rowconfigure(5, weight=1)
+        root.rowconfigure(3, weight=1)
 
         ttk.Label(root, text="原视频 / 主参考").grid(
             row=0, column=0, sticky="w", padx=(0, 8), pady=4
@@ -91,35 +96,13 @@ class VideoLocalizerWindow(tk.Tk):
         elif locale_values:
             self.locale_combo.current(0)
 
-        ttk.Label(root, text="转化要求").grid(
-            row=2, column=0, sticky="nw", padx=(0, 8), pady=4
-        )
-        self.instruction_text = tk.Text(root, height=3, wrap="word")
-        self.instruction_text.insert(
-            "1.0",
-            "将人物和场景转化为目标地区版本，严格保持人物、场景、创意结构、镜头节奏和整体效果一致。",
-        )
-        self.instruction_text.grid(row=2, column=1, columnspan=2, sticky="ew", pady=4)
-
-        refs = ttk.LabelFrame(root, text="分镜参考图", padding=8)
-        refs.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 8))
-        ttk.Label(
-            refs,
-            text=(
-                "前端不上传用户参考图。Doubao 会分析完整源视频并为每个镜头选择关键帧，"
-                "随后由 Seedream 生成低成本场景参考图；生成结果会在第二次确认前留存。"
-            ),
-            wraplength=920,
-            justify="left",
-        ).grid(row=0, column=0, sticky="w")
-
         self.settings = SettingsPanel(root, self.base_config)
-        self.settings.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+        self.settings.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 8))
 
         run_frame = ttk.LabelFrame(root, text="运行状态", padding=8)
-        run_frame.grid(row=5, column=0, columnspan=3, sticky="nsew")
+        run_frame.grid(row=3, column=0, columnspan=3, sticky="nsew")
         run_frame.columnconfigure(1, weight=1)
-        run_frame.rowconfigure(8, weight=1)
+        run_frame.rowconfigure(6, weight=1)
         for row, label in enumerate(
             ("当前步骤", "进度", "H3 task ID", "最近请求 ID", "片段 / 尝试")
         ):
@@ -215,7 +198,7 @@ class VideoLocalizerWindow(tk.Tk):
         review_scrollbar.grid(row=0, column=1, sticky="ns")
 
         self.log_panel = LogPanel(run_frame)
-        self.log_panel.grid(row=8, column=0, columnspan=3, sticky="nsew", pady=(10, 0))
+        # Keep the event sink for existing status handling, but hide the live log UI.
 
     def _choose_video(self) -> None:
         path = filedialog.askopenfilename(
@@ -232,13 +215,12 @@ class VideoLocalizerWindow(tk.Tk):
         target_locale = locale_from_label(self.locale_combo.get())
         if target_locale is None:
             raise ValueError("请选择 H3 支持的目标地区")
-        instruction = self.instruction_text.get("1.0", "end").strip()
         return JobSpec(
             input_video=input_path,
             target_language=target_locale.language_code,
             target_region=target_locale.region,
             target_locale=target_locale.locale_code,
-            transformation_instruction=instruction,
+            transformation_instruction=DEFAULT_TRANSFORMATION_INSTRUCTION,
         )
 
     def _effective_config(self) -> AppConfig:

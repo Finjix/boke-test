@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass, field
+import mimetypes
 from pathlib import Path
 from typing import Any
 
@@ -14,12 +16,57 @@ from config import (
     FIXED_DOUBAO_MODEL,
     FIXED_SEEDREAM_MODEL,
     FIXED_SEEDREAM_SIZE,
+    SEEDREAM_MAX_INPUT_IMAGES,
 )
 from utils.artifacts import persist_raw_json, persist_raw_text
 from utils.errors import ProviderError, ValidationError
 from utils.ids import new_request_id
 from utils.logger import JobLogger
 from utils.retry import retry_call
+
+
+def encode_video_as_data_url(path: Path) -> tuple[str, dict[str, Any]]:
+    """Encode a local video for Ark Chat API multimodal input.
+
+    The actual Base64 string is returned only to build the in-memory request.
+    The metadata dictionary is safe to persist as evidence and deliberately
+    excludes the large encoded payload.
+    """
+
+    source = Path(path)
+    try:
+        raw = source.read_bytes()
+    except OSError as exc:
+        raise ProviderError(
+            f"Doubao Base64 video could not be read: {source}",
+            provider="ark",
+            error_code="VIDEO_READ_FAILED",
+            retryable=False,
+        ) from exc
+    if not raw:
+        raise ProviderError(
+            "Doubao Base64 video is empty",
+            provider="ark",
+            error_code="VIDEO_EMPTY",
+            retryable=False,
+        )
+    mime_type = mimetypes.guess_type(source.name)[0] or "video/mp4"
+    if not mime_type.startswith("video/"):
+        raise ProviderError(
+            f"Doubao Base64 input is not a video MIME type: {mime_type}",
+            provider="ark",
+            error_code="VIDEO_MIME_INVALID",
+            retryable=False,
+        )
+    encoded = base64.b64encode(raw).decode("ascii")
+    data_url = f"data:{mime_type};base64,{encoded}"
+    return data_url, {
+        "mode": "base64",
+        "local_path": str(source),
+        "mime_type": mime_type,
+        "byte_size": len(raw),
+        "data_url_length": len(data_url),
+    }
 
 
 def extract_text(response: ApiResponse | dict[str, Any]) -> str:
@@ -224,6 +271,13 @@ class ArkClient:
                 "Seedream source images must use HTTPS URLs",
                 provider="seedream",
                 error_code="IMAGE_URL_INVALID",
+                retryable=False,
+            )
+        if len(values) > SEEDREAM_MAX_INPUT_IMAGES:
+            raise ProviderError(
+                f"Seedream accepts at most {SEEDREAM_MAX_INPUT_IMAGES} input images",
+                provider="seedream",
+                error_code="IMAGE_LIMIT_EXCEEDED",
                 retryable=False,
             )
         if self.config.seedream_model != FIXED_SEEDREAM_MODEL:

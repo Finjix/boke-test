@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from api.common import ApiResponse
 from api.ark import extract_text
-from config import AppConfig
+from config import AppConfig, SEEDREAM_MAX_INPUT_IMAGES
 from core.models import JobSpec, UploadedAsset
 from core.h3_prompt import build_transformation_prompt
 from core.pipeline import VideoLocalizationPipeline
@@ -53,11 +53,15 @@ class FakeArk:
         payload: dict,
         *,
         fail_first: bool = False,
+        chat_failures: int = 0,
         image_fail_first: bool = False,
+        image_failures: int = 0,
     ) -> None:
         self.payload = payload
         self.fail_first = fail_first
+        self.chat_failures = chat_failures
         self.image_fail_first = image_fail_first
+        self.image_failures = image_failures
         self.chat_calls: list[tuple[list[dict], dict]] = []
         self.image_calls: list[tuple[list[str], str, dict]] = []
         self.last_request_id: str | None = None
@@ -68,7 +72,7 @@ class FakeArk:
 
     def chat(self, messages, **kwargs):
         self.chat_calls.append((messages, kwargs))
-        if self.fail_first and len(self.chat_calls) == 1:
+        if (self.fail_first and len(self.chat_calls) == 1) or len(self.chat_calls) <= self.chat_failures:
             raise ProviderError(
                 "Doubao analysis failed",
                 provider="ark",
@@ -94,7 +98,7 @@ class FakeArk:
         self.image_calls.append((list(image_urls), prompt, kwargs))
         request_id = f"seedream-request-{len(self.image_calls)}"
         self.last_request_id = request_id
-        if self.image_fail_first and len(self.image_calls) == 1:
+        if (self.image_fail_first and len(self.image_calls) == 1) or len(self.image_calls) <= self.image_failures:
             raise ProviderError(
                 "Seedream image generation failed",
                 provider="seedream",
@@ -106,6 +110,63 @@ class FakeArk:
             {
                 "data": [{"url": f"https://example.test/seedream-{len(self.image_calls)}.png"}],
             },
+            request_id,
+        )
+
+
+class SensitiveOutputArk(FakeArk):
+    """Ark stub that asks for a prompt rewrite after a Seedream rejection."""
+
+    def __init__(self, payload: dict) -> None:
+        super().__init__(payload)
+        self.prompt_revision_calls = 0
+
+    def chat(self, messages, **kwargs):
+        user_content = messages[-1].get("content", "")
+        if isinstance(user_content, str) and "Rewrite this Seedream prompt" in user_content:
+            self.prompt_revision_calls += 1
+            self.chat_calls.append((messages, kwargs))
+            return ApiResponse(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "prompt": (
+                                            "Edit the supplied source keyframe into a complete Saudi target-region "
+                                            "storyboard reference. Preserve the same visible people, relationship, "
+                                            "current pose, object placement, camera framing, action timing and "
+                                            "lighting. Rebuild the storefront, wardrobe, signs, packaging and "
+                                            "vehicle with neutral non-graphic visual language, using a wallet "
+                                            "interaction where the source action occurs."
+                                        )
+                                    },
+                                    ensure_ascii=False,
+                                )
+                            }
+                        }
+                    ]
+                },
+                "prompt-revision-request-1",
+            )
+        return super().chat(messages, **kwargs)
+
+    def generate_image(self, image_urls, prompt, **kwargs):
+        self.image_calls.append((list(image_urls), prompt, kwargs))
+        request_id = f"seedream-request-{len(self.image_calls)}"
+        self.last_request_id = request_id
+        if len(self.image_calls) == 1:
+            raise ProviderError(
+                "The output image may contain sensitive information",
+                provider="seedream",
+                status_code=400,
+                error_code="OutputImageSensitiveContentDetected",
+                request_id=request_id,
+                retryable=False,
+            )
+        return ApiResponse(
+            {"data": [{"url": "https://example.test/seedream-safe.png"}]},
             request_id,
         )
 
@@ -352,6 +413,7 @@ class H3WorkflowTests(unittest.TestCase):
             source.write_bytes(b"source")
             ark = FakeArk(self._doubao_payload())
             h3 = FakeH3()
+            uguu = FakeUguu()
             with patch("core.h3_pipeline.ffprobe.probe", return_value=_info(source, 5.75)), patch(
                 "core.h3_pipeline.normalize_video", side_effect=self._normalize
             ), patch("core.h3_pipeline.extract_frame_at", side_effect=self._extract_frame), patch(
@@ -361,12 +423,13 @@ class H3WorkflowTests(unittest.TestCase):
                     self._config(root),
                     ark_client=ark,
                     minimax_client=h3,
-                    uguu_client=FakeUguu(),
+                    uguu_client=uguu,
                 )
                 waiting = pipeline.run(self._spec(source), skip_preflight=True)
                 self.assertEqual(waiting.stage.value, "waiting_for_approval")
                 self.assertEqual(waiting.action_required, "approve_doubao")
                 self.assertEqual(len(h3.create_calls), 0)
+                self.assertEqual(uguu.assets, [])
                 reference_waiting = pipeline.approve_doubao(waiting.job_id)
                 self.assertEqual(reference_waiting.stage.value, "waiting_for_reference_approval")
                 self.assertEqual(reference_waiting.action_required, "approve_seedream")
@@ -377,12 +440,12 @@ class H3WorkflowTests(unittest.TestCase):
             self.assertEqual(len(ark.chat_calls), 1)
             self.assertEqual(len(h3.create_calls), 1)
 
-    def test_failed_doubao_requires_explicit_retry_and_preserves_attempt_evidence(self) -> None:
+    def test_failed_doubao_auto_retries_then_explicit_retry_preserves_attempt_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "source.mp4"
             source.write_bytes(b"source")
-            ark = FakeArk(self._doubao_payload(), fail_first=True)
+            ark = FakeArk(self._doubao_payload(), chat_failures=4)
             h3 = FakeH3()
             with patch("core.h3_pipeline.ffprobe.probe", return_value=_info(source, 5.0)), patch(
                 "core.h3_pipeline.normalize_video", side_effect=self._normalize
@@ -395,8 +458,12 @@ class H3WorkflowTests(unittest.TestCase):
                     minimax_client=h3,
                     uguu_client=FakeUguu(),
                 )
-                with self.assertRaises(ProviderError):
-                    pipeline.run(self._spec(source), execution_mode="auto", skip_preflight=True)
+                with patch.object(pipeline.cancel_event, "wait", return_value=False) as wait:
+                    with self.assertRaises(ProviderError):
+                        pipeline.run(self._spec(source), execution_mode="auto", skip_preflight=True)
+                self.assertEqual(wait.call_args_list[0].args, (10.0,))
+                self.assertEqual(wait.call_args_list[1].args, (10.0,))
+                self.assertEqual(wait.call_args_list[2].args, (10.0,))
                 job_id = pipeline.history_store.list_entries()[0].job_id
                 failed_checkpoint = json.loads(
                     (root / "work" / job_id / "checkpoint.json").read_text(encoding="utf-8")
@@ -423,30 +490,30 @@ class H3WorkflowTests(unittest.TestCase):
                 result = pipeline.retry_doubao(job_id)
 
             self.assertEqual(result.stage.value, "completed")
-            self.assertEqual(len(ark.chat_calls), 2)
+            self.assertEqual(len(ark.chat_calls), 5)
             self.assertEqual(len(ark.image_calls), 1)
             self.assertEqual(len(h3.create_calls), 1)
             job_dir = root / "work" / job_id
             checkpoint = json.loads((job_dir / "checkpoint.json").read_text(encoding="utf-8"))
             self.assertEqual(
                 [node["node"] for node in checkpoint["node_executions"]],
-                ["doubao", "doubao", "seedream", "h3"],
+                ["doubao", "doubao", "doubao", "doubao", "doubao", "seedream", "h3"],
             )
             self.assertEqual(
-                [node["status"] for node in checkpoint["node_executions"][:2]],
-                ["failed", "completed"],
+                [node["status"] for node in checkpoint["node_executions"][:5]],
+                ["failed", "failed", "failed", "failed", "completed"],
             )
             self.assertEqual(
                 checkpoint["node_executions"][0]["provider_calls"][0]["request_id"],
                 "doubao-request-1",
             )
             self.assertEqual(
-                checkpoint["node_executions"][1]["provider_calls"][0]["request_id"],
-                "doubao-request-2",
+                checkpoint["node_executions"][4]["provider_calls"][0]["request_id"],
+                "doubao-request-5",
             )
             self.assertTrue((job_dir / "json/nodes/doubao/attempt_001/failure.json").is_file())
-            self.assertTrue((job_dir / "json/nodes/doubao/attempt_002/package.json").is_file())
-            self.assertTrue((job_dir / "json/nodes/doubao/attempt_002/h3_prompt.txt").is_file())
+            self.assertTrue((job_dir / "json/nodes/doubao/attempt_005/package.json").is_file())
+            self.assertTrue((job_dir / "json/nodes/doubao/attempt_005/h3_prompt.txt").is_file())
             self.assertTrue(
                 (job_dir / "json/nodes/seedream/shot_shot_001/attempt_001/response.json").is_file()
             )
@@ -674,7 +741,10 @@ class H3WorkflowTests(unittest.TestCase):
             self.assertEqual(len(ark.image_calls), 2)
             self.assertEqual(len(ark.image_calls[0][0]), 1)
             self.assertEqual(len(ark.image_calls[1][0]), 2)
-            self.assertEqual(ark.image_calls[1][0][1], uguu.assets[2].remote_url)
+            # Doubao now analyzes the local master via Base64, so Uguu's
+            # first asset is the first Seedream source frame rather than the
+            # old Doubao source-video upload.
+            self.assertEqual(ark.image_calls[1][0][1], uguu.assets[1].remote_url)
             checkpoint = json.loads(
                 (root / "work" / waiting.job_id / "checkpoint.json").read_text(
                     encoding="utf-8"
@@ -698,11 +768,19 @@ class H3WorkflowTests(unittest.TestCase):
             second_content = h3.create_calls[1][0]
             self.assertEqual(
                 [item["type"] for item in second_content],
-                ["text", "video_url", "image_url"],
+                ["text", "video_url", "image_url", "image_url"],
             )
             self.assertEqual(
                 [item.get("role") for item in second_content[1:]],
-                ["reference_video", "reference_image"],
+                ["reference_video", "reference_image", "reference_image"],
+            )
+            self.assertEqual(
+                checkpoint["h3_segments"][1]["continuity_reference_shot_ids"],
+                ["shot_001"],
+            )
+            self.assertIn(
+                "previous-segment continuity shot shot_001",
+                checkpoint["h3_segments"][1]["prompt"],
             )
 
     def test_previous_generated_video_is_used_when_reference_budget_allows(self) -> None:
@@ -739,12 +817,82 @@ class H3WorkflowTests(unittest.TestCase):
             second_content = h3.create_calls[1][0]
             self.assertEqual(
                 [item["type"] for item in second_content],
-                ["text", "video_url", "image_url"],
+                ["text", "video_url", "image_url", "image_url"],
             )
             self.assertEqual(
                 [item.get("role") for item in second_content[1:]],
-                ["reference_video", "reference_image"],
+                ["reference_video", "reference_image", "reference_image"],
             )
+
+    def test_seedream_uses_all_previous_references_then_keeps_newest_at_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.mp4"
+            source.write_bytes(b"source")
+            payload = self._doubao_payload(5000)
+            template = payload["reference_shots"][0]
+            shots = []
+            for index in range(12):
+                shot = dict(template)
+                start_ms = index * 400
+                shot.update(
+                    {
+                        "shot_id": f"shot_{index + 1:03d}",
+                        "start_ms": start_ms,
+                        "end_ms": start_ms + 400,
+                        "keyframe_ms": start_ms + 200,
+                        "scene_description": f"Target-region street beat {index + 1}.",
+                    }
+                )
+                shots.append(shot)
+            payload["reference_shots"] = shots
+            ark = FakeArk(payload)
+            uguu = FakeUguu()
+            pipeline = VideoLocalizationPipeline(
+                self._config(root),
+                ark_client=ark,
+                minimax_client=FakeH3(),
+                uguu_client=uguu,
+            )
+            with patch("core.h3_pipeline.ffprobe.probe", return_value=_info(source, 5.0)), patch(
+                "core.h3_pipeline.normalize_video", side_effect=self._normalize
+            ), patch("core.h3_pipeline.extract_frame_at", side_effect=self._extract_frame), patch(
+                "core.h3_pipeline.download", side_effect=self._download
+            ):
+                # The test intentionally creates twelve storyboard references;
+                # H3 later rejects a single segment covering more than nine.
+                with self.assertRaises(ValidationError):
+                    pipeline.run(self._spec(source), execution_mode="auto", skip_preflight=True)
+
+            self.assertEqual(len(ark.image_calls), 12)
+            self.assertEqual(len(ark.image_calls[0][0]), 1)
+            self.assertEqual(len(ark.image_calls[1][0]), 2)
+            self.assertEqual(len(ark.image_calls[SEEDREAM_MAX_INPUT_IMAGES - 1][0]), 10)
+            generated_urls = [
+                asset.remote_url
+                for asset in uguu.assets
+                if asset.kind.endswith("_reference") and "continuity" not in asset.kind
+            ]
+            self.assertEqual(len(generated_urls), 12)
+            # shot_011 has ten predecessors, so it retains shot_002..shot_010.
+            self.assertEqual(
+                ark.image_calls[SEEDREAM_MAX_INPUT_IMAGES][0][1:],
+                generated_urls[1:SEEDREAM_MAX_INPUT_IMAGES],
+            )
+            self.assertEqual(
+                ark.image_calls[SEEDREAM_MAX_INPUT_IMAGES + 1][0][1:],
+                generated_urls[2 : SEEDREAM_MAX_INPUT_IMAGES + 1],
+            )
+            job_id = pipeline.history_store.list_entries()[0].job_id
+            checkpoint = json.loads(
+                (root / "work" / job_id / "checkpoint.json").read_text(encoding="utf-8")
+            )
+            shot_011_attempt = checkpoint["seedream_references"][10]["attempts"][0]
+            self.assertEqual(
+                shot_011_attempt["continuity_reference_shot_ids"],
+                [f"shot_{index:03d}" for index in range(2, 11)],
+            )
+            self.assertEqual(shot_011_attempt["continuity_references_omitted"], 1)
 
     def test_failed_segment_retry_creates_new_task_without_repeating_any_other_step(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -820,7 +968,7 @@ class H3WorkflowTests(unittest.TestCase):
             root = Path(directory)
             source = root / "source.mp4"
             source.write_bytes(b"source")
-            ark = FakeArk(self._doubao_payload(), image_fail_first=True)
+            ark = FakeArk(self._doubao_payload(), image_failures=4)
             h3 = FakeH3()
             with patch("core.h3_pipeline.ffprobe.probe", return_value=_info(source, 5.0)), patch(
                 "core.h3_pipeline.normalize_video", side_effect=self._normalize
@@ -834,8 +982,9 @@ class H3WorkflowTests(unittest.TestCase):
                     uguu_client=FakeUguu(),
                 )
                 waiting = pipeline.run(self._spec(source), skip_preflight=True)
-                with self.assertRaises(ProviderError):
-                    pipeline.approve_doubao(waiting.job_id)
+                with patch.object(pipeline.cancel_event, "wait", return_value=False):
+                    with self.assertRaises(ProviderError):
+                        pipeline.approve_doubao(waiting.job_id)
                 job_id = waiting.job_id
                 failed = pipeline.run(
                     self._spec(source),
@@ -844,12 +993,12 @@ class H3WorkflowTests(unittest.TestCase):
                 )
                 self.assertEqual(failed.stage.value, "failed")
                 self.assertEqual(len(ark.chat_calls), 1)
-                self.assertEqual(len(ark.image_calls), 1)
+                self.assertEqual(len(ark.image_calls), 4)
 
                 reference_waiting = pipeline.retry_seedream(job_id)
                 self.assertEqual(reference_waiting.stage.value, "waiting_for_reference_approval")
                 self.assertEqual(len(ark.chat_calls), 1)
-                self.assertEqual(len(ark.image_calls), 2)
+                self.assertEqual(len(ark.image_calls), 5)
                 completed = pipeline.approve_seedream(job_id)
 
             self.assertEqual(completed.stage.value, "completed")
@@ -858,8 +1007,63 @@ class H3WorkflowTests(unittest.TestCase):
                 (job_dir / "json/nodes/seedream/shot_shot_001/attempt_001/failure.json").is_file()
             )
             self.assertTrue(
-                (job_dir / "json/nodes/seedream/shot_shot_001/attempt_002/reference.png").is_file()
+                (job_dir / "json/nodes/seedream/shot_shot_001/attempt_005/reference.png").is_file()
             )
+
+    def test_sensitive_seedream_output_sends_prompt_back_to_doubao_before_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.mp4"
+            source.write_bytes(b"source")
+            ark = SensitiveOutputArk(self._doubao_payload())
+            pipeline = VideoLocalizationPipeline(
+                self._config(root),
+                ark_client=ark,
+                minimax_client=FakeH3(),
+                uguu_client=FakeUguu(),
+            )
+            with patch("core.h3_pipeline.ffprobe.probe", return_value=_info(source, 5.0)), patch(
+                "core.h3_pipeline.normalize_video", side_effect=self._normalize
+            ), patch("core.h3_pipeline.extract_frame_at", side_effect=self._extract_frame), patch(
+                "core.h3_pipeline.download", side_effect=self._download
+            ):
+                waiting = pipeline.run(self._spec(source), skip_preflight=True)
+                with patch.object(pipeline.cancel_event, "wait", return_value=False):
+                    with self.assertRaises(ProviderError) as raised:
+                        pipeline.approve_doubao(waiting.job_id)
+                self.assertEqual(
+                    raised.exception.error_code,
+                    "OutputImageSensitiveContentDetected",
+                )
+
+                job_id = waiting.job_id
+                checkpoint_path = root / "work" / job_id / "checkpoint.json"
+                failed_checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+                attempt = failed_checkpoint["seedream_references"][0]["attempts"][0]
+                self.assertEqual(ark.prompt_revision_calls, 1)
+                self.assertEqual(len(ark.image_calls), 1)
+                self.assertNotEqual(
+                    attempt["prompt_before_revision"],
+                    attempt["prompt_after_revision"],
+                )
+                self.assertEqual(
+                    failed_checkpoint["seedream_references"][0]["prompt"],
+                    attempt["prompt_after_revision"],
+                )
+                for field in (
+                    "prompt_revision_request_artifact",
+                    "prompt_revision_response_artifact",
+                ):
+                    self.assertTrue((root / "work" / job_id / attempt[field]).is_file())
+
+                with patch.object(pipeline.cancel_event, "wait", return_value=False):
+                    reference_waiting = pipeline.retry_seedream(job_id)
+
+            self.assertEqual(reference_waiting.stage.value, "waiting_for_reference_approval")
+            self.assertEqual(len(ark.chat_calls), 2)
+            self.assertEqual(ark.prompt_revision_calls, 1)
+            self.assertEqual(len(ark.image_calls), 2)
+            self.assertEqual(ark.image_calls[1][1], failed_checkpoint["seedream_references"][0]["prompt"])
 
     def test_user_reference_images_are_rejected_by_active_v7_pipeline(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

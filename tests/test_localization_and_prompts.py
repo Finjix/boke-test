@@ -5,8 +5,10 @@ import unittest
 
 from core.localization import (
     analyze_video,
+    build_video_analysis_messages,
     localization_package_schema,
     recover_doubao_schema_wrapper,
+    soften_provider_sensitive_language,
     validate_localization_package,
 )
 from core.models import JobSpec, LocalizationPackage, UploadedAsset
@@ -92,6 +94,24 @@ class LocalizationAndPromptTests(unittest.TestCase):
                 "cultural_requirements",
             ],
         )
+
+    def test_video_analysis_messages_accept_ark_base64_video_input(self) -> None:
+        messages = build_video_analysis_messages(
+            "data:video/mp4;base64,AAAA",
+            target_language="ar",
+            target_region="Saudi Arabia",
+            target_locale="ar-SA",
+        )
+        video = messages[1]["content"][0]
+        self.assertEqual(video["type"], "video_url")
+        self.assertTrue(video["video_url"]["url"].startswith("data:video/mp4;base64,"))
+        with self.assertRaises(ValidationError):
+            build_video_analysis_messages(
+                "file:///input.mp4",
+                target_language="ar",
+                target_region="Saudi Arabia",
+                target_locale="ar-SA",
+            )
 
     def test_active_schema_requires_h3_prompt(self) -> None:
         schema = localization_package_schema(require_h3_prompt=True)
@@ -233,6 +253,17 @@ class LocalizationAndPromptTests(unittest.TestCase):
         self.assertEqual([item["status"] for item in details], ["failed", "completed"])
         self.assertIn("7000-character limit", details[0]["error"]["message"])
 
+    def test_provider_sensitive_prompt_language_is_softened_without_removing_action(self) -> None:
+        softened = soften_provider_sensitive_language(
+            "The thief is stealing the stolen wallet; this is a pickpocket theft."
+            " 小偷正在偷走钱包，属于盗窃行为。"
+        )
+        self.assertEqual(
+            softened,
+            "The person is taking the taken wallet; this is a person reaching for a wallet "
+            "wallet-taking moment. 人物正在拿走钱包，属于拿取动作。",
+        )
+
     def test_valid_package_uses_integer_milliseconds_and_role_mapping(self) -> None:
         result = validate_localization_package(
             self.raw_package,
@@ -331,6 +362,15 @@ class LocalizationAndPromptTests(unittest.TestCase):
         self.assertIsNotNone(active_recovered)
         assert active_recovered is not None
         self.assertEqual(active_recovered["reference_shots"][0]["shot_id"], "shot_001")
+        truncated_recovered = recover_doubao_schema_wrapper(
+            json.dumps(active_wrapper, ensure_ascii=False)[:-1]
+        )
+        self.assertIsNotNone(truncated_recovered)
+        assert truncated_recovered is not None
+        self.assertEqual(
+            truncated_recovered["reference_shots"][0]["shot_id"],
+            "shot_001",
+        )
 
         class WrapperClient:
             @staticmethod

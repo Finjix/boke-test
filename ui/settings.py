@@ -43,15 +43,6 @@ class SettingsPanel(ttk.LabelFrame):
         ttk.Entry(self, textvariable=minimax_variable, width=48, show="*").grid(
             row=1, column=1, sticky="ew", pady=3
         )
-        ttk.Label(
-            self,
-            text=(
-                "Doubao 模型：doubao-seed-2-0-lite-260428    "
-                "H3 模型：MiniMax-H3    默认分辨率：768P"
-            ),
-        ).grid(
-            row=2, column=0, columnspan=2, sticky="w", pady=(5, 0)
-        )
         self.auto_continue_var = tk.BooleanVar(
             value=bool(preferences.get("auto_continue_to_seedance", False))
         )
@@ -60,10 +51,7 @@ class SettingsPanel(ttk.LabelFrame):
             text="Doubao 完成后自动进入 H3（跳过方案和参考图两次确认）",
             variable=self.auto_continue_var,
         ).grid(
-            row=3, column=0, columnspan=2, sticky="w", pady=(5, 0)
-        )
-        ttk.Label(self, text="密钥只保存在项目根目录本地设置文件，不写入任务日志。").grid(
-            row=4, column=0, columnspan=2, sticky="w", pady=(2, 0)
+            row=2, column=0, columnspan=2, sticky="w", pady=(5, 0)
         )
         self.columnconfigure(1, weight=1)
 

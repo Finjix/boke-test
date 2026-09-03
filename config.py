@@ -26,6 +26,19 @@ FIXED_SEEDREAM_MODEL = "doubao-seedream-5-0-pro-260628"
 # Seedream storyboard references use the lowest currently accepted 2K size;
 # they are continuity aids, not final-resolution delivery assets.
 FIXED_SEEDREAM_SIZE = "2K"
+# Seedream 5.0 Pro accepts at most ten reference images in one image-edit
+# request. The current source keyframe occupies the first slot, leaving room
+# for the nine newest previously generated storyboard references.
+SEEDREAM_MAX_INPUT_IMAGES = 10
+# Ark Chat API accepts local video as a Base64 data URL. Keep the limits
+# conservative enough to leave room for the JSON prompt and request envelope.
+DOUBAO_VIDEO_INPUT_MODES = frozenset({"base64", "url"})
+DOUBAO_BASE64_MAX_VIDEO_MIB = 50
+DOUBAO_BASE64_MAX_REQUEST_MIB = 64
+# Pre-H3 provider stages may recover transient provider/validation failures.
+# This is the number of automatic retries after the initial attempt.
+PRE_H3_RETRY_INTERVAL_SECONDS = 10.0
+PRE_H3_MAX_RETRIES = 3
 FIXED_MINIMAX_H3_MODEL = "MiniMax-H3"
 MINIMAX_CN_BASE_URL = "https://api.minimax.cn"
 MINIMAX_H3_DEFAULT_RESOLUTION = "768P"
@@ -103,6 +116,9 @@ class AppConfig:
     uguu_upload_url: str = "https://uguu.se/upload"
     uguu_max_file_mib: int = 128
     uguu_expire_hours: int = 3
+    # Base64 avoids the temporary public upload for the Doubao analysis node.
+    # H3 and Seedream still use Uguu URLs for their provider-specific inputs.
+    doubao_video_input_mode: str = "base64"
 
     http_timeout: float = 180.0
     poll_interval: float = 10.0
@@ -126,6 +142,7 @@ class AppConfig:
             f"seedance_max_duration={self.seedance_max_duration!r}, "
             f"seedance_task_timeout={self.seedance_task_timeout!r}, "
             f"uguu_upload_url={self.uguu_upload_url!r}, "
+            f"doubao_video_input_mode={self.doubao_video_input_mode!r}, "
             f"work_dir={str(self.work_dir)!r})"
         )
 
@@ -184,6 +201,11 @@ class AppConfig:
             ),
             uguu_max_file_mib=_int(source, "UGUU_MAX_FILE_MIB", 128),
             uguu_expire_hours=_int(source, "UGUU_EXPIRE_HOURS", 3),
+            doubao_video_input_mode=_text(
+                source,
+                "DOUBAO_VIDEO_INPUT_MODE",
+                "base64",
+            ).casefold(),
             http_timeout=_float(source, "HTTP_TIMEOUT", 180.0),
             poll_interval=_float(source, "POLL_INTERVAL", 10.0),
             max_retries=_int(source, "MAX_RETRIES", 3),
@@ -222,6 +244,10 @@ class AppConfig:
             )
         if not self.uguu_upload_url.startswith("https://"):
             raise ConfigurationError("UGUU_UPLOAD_URL must be an HTTPS URL")
+        if self.doubao_video_input_mode.casefold() not in DOUBAO_VIDEO_INPUT_MODES:
+            raise ConfigurationError(
+                "DOUBAO_VIDEO_INPUT_MODE must be one of: base64, url"
+            )
         if self.seedance_max_duration <= 0:
             raise ConfigurationError("SEEDANCE_MAX_DURATION must be positive")
         if self.seedance_task_timeout <= 0:

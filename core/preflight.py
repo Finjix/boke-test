@@ -9,7 +9,14 @@ from typing import Any
 from api.minimax import MiniMaxClient
 from api.seedance import SeedanceClient
 from api.uguu import UguuClient
-from config import AppConfig, FIXED_DOUBAO_MODEL, FIXED_SEEDREAM_MODEL
+from config import (
+    AppConfig,
+    DOUBAO_BASE64_MAX_REQUEST_MIB,
+    DOUBAO_BASE64_MAX_VIDEO_MIB,
+    DOUBAO_VIDEO_INPUT_MODES,
+    FIXED_DOUBAO_MODEL,
+    FIXED_SEEDREAM_MODEL,
+)
 from core.models import JobSpec, PreflightCheck, PreflightReport
 from language_config import is_h3_native_language
 from utils.errors import PreflightError
@@ -198,6 +205,11 @@ def run_h3_preflight(
         config.doubao_model,
     )
     add(
+        "DOUBAO_VIDEO_INPUT_MODE",
+        config.doubao_video_input_mode.casefold() in DOUBAO_VIDEO_INPUT_MODES,
+        config.doubao_video_input_mode,
+    )
+    add(
         "SEEDREAM_MODEL",
         config.seedream_model == FIXED_SEEDREAM_MODEL,
         config.seedream_model,
@@ -244,6 +256,23 @@ def run_h3_preflight(
                 within,
                 "within Uguu input limit" if within else f"larger than {limit // (1024 * 1024)} MiB",
             )
+            if config.doubao_video_input_mode.casefold() == "base64":
+                byte_size = path.stat().st_size
+                estimated_request_bytes = ((byte_size + 2) // 3) * 4 + 256 * 1024
+                base64_within = (
+                    byte_size <= DOUBAO_BASE64_MAX_VIDEO_MIB * 1024 * 1024
+                    and estimated_request_bytes <= DOUBAO_BASE64_MAX_REQUEST_MIB * 1024 * 1024
+                )
+                add(
+                    f"doubao-base64-size:{path.name}",
+                    base64_within,
+                    (
+                        f"within {DOUBAO_BASE64_MAX_VIDEO_MIB} MiB video and "
+                        f"{DOUBAO_BASE64_MAX_REQUEST_MIB} MiB request limits"
+                        if base64_within
+                        else "too large for Doubao Base64 input"
+                    ),
+                )
 
     work_dir = Path(job_dir or config.work_dir)
     try:
@@ -259,9 +288,9 @@ def run_h3_preflight(
         uploader = uguu_client or UguuClient(config, logger=logger)
         try:
             uploader.check_access(raw_dir=work_dir / "json" / "raw")
-            add("Uguu upload endpoint", True, "endpoint reachable")
+            add("Uguu upload endpoint (H3/Seedream)", True, "endpoint reachable")
         except Exception as exc:  # noqa: BLE001 - surfaced as a check
-            add("Uguu upload endpoint", False, str(exc))
+            add("Uguu upload endpoint (H3/Seedream)", False, str(exc))
         h3 = minimax_client or MiniMaxClient(config, logger=logger)
         try:
             h3.check_access(raw_dir=work_dir / "json" / "raw")
