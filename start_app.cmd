@@ -5,8 +5,9 @@ cd /d "%~dp0"
 set "BOOTSTRAP_SCRIPT=%~dp0tools\install_dependencies.ps1"
 set "POWERSHELL=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
 set "PROJECT_PYTHON=%~dp0runtime\python3.13.15\python.exe"
-set "PROJECT_READY=%~dp0runtime\python3.13.15\.project-ready"
+set "PROJECT_READY=%~dp0runtime\python3.13.15\.project-ready-v2"
 set "FFPROBE_BIN=%~dp0tools\ffmpeg\bin\ffprobe.exe"
+set "FFMPEG_BIN=%~dp0tools\ffmpeg\bin\ffmpeg.exe"
 
 if not exist "%BOOTSTRAP_SCRIPT%" (
     echo [ERROR] Dependency bootstrap script was not found.
@@ -24,6 +25,7 @@ if not exist "%POWERSHELL%" (
 if not exist "%PROJECT_READY%" goto bootstrap
 if not exist "%PROJECT_PYTHON%" goto bootstrap
 if not exist "%FFPROBE_BIN%" goto bootstrap
+if not exist "%FFMPEG_BIN%" goto bootstrap
 goto run
 
 :bootstrap

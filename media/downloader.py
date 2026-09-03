@@ -1,4 +1,4 @@
-"""Streaming downloads for provider-produced temporary media URLs."""
+"""Streaming download helper for the provider-produced video."""
 
 from __future__ import annotations
 
@@ -18,30 +18,35 @@ def download(
 ) -> Path:
     if not url.startswith(("http://", "https://")):
         raise ProviderError(
-            "Download URL must use HTTP(S)",
+            "生成结果地址无效",
             provider="downloader",
             error_code="INVALID_DOWNLOAD_URL",
-            retryable=False,
         )
     client = session or requests.Session()
-
-    def operation() -> Path:
-        try:
-            response = client.get(url, stream=True, timeout=timeout)
-            response.raise_for_status()
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            with output_path.open("wb") as handle:
-                for chunk in response.iter_content(chunk_size=1024 * 1024):
-                    if chunk:
-                        handle.write(chunk)
-        except requests.exceptions.RequestException as exc:
-            status = getattr(getattr(exc, "response", None), "status_code", None)
+    output_path = Path(output_path)
+    temporary = output_path.with_name(f".{output_path.name}.download")
+    try:
+        response = client.get(url, stream=True, timeout=timeout)
+        response.raise_for_status()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with temporary.open("wb") as handle:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    handle.write(chunk)
+        if not temporary.is_file() or temporary.stat().st_size <= 0:
             raise ProviderError(
-                f"Download failed: {exc}",
+                "生成结果为空",
                 provider="downloader",
-                status_code=status,
-                retryable=status is None or status == 429 or status >= 500,
-            ) from exc
-        return output_path
-
-    return operation()
+                error_code="EMPTY_DOWNLOAD",
+            )
+        temporary.replace(output_path)
+    except requests.exceptions.RequestException as exc:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        raise ProviderError(
+            "生成结果下载失败",
+            provider="downloader",
+            status_code=status,
+        ) from exc
+    finally:
+        temporary.unlink(missing_ok=True)
+    return output_path

@@ -12,4 +12,6 @@ tools/ffmpeg/
 tools/mediakit/
 work/*
 !work/.gitkeep
+output/*
+!output/.gitkeep
 *.log

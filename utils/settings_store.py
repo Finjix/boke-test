@@ -8,6 +8,7 @@ from typing import Mapping
 
 
 SETTINGS_FILENAME = ".video-localizer-settings.json"
+SETTINGS_VERSION = 1
 EDITABLE_SETTING_NAMES = ("minimax_api_key",)
 
 
@@ -38,7 +39,7 @@ class SettingsStore:
             name: str(values.get(name, "")).strip()
             for name in EDITABLE_SETTING_NAMES
         }
-        payload = {"version": 4, "values": normalized}
+        payload = {"version": SETTINGS_VERSION, "values": normalized}
         temporary_path = self.path.with_name(f".{self.path.name}.tmp")
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)

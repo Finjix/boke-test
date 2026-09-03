@@ -1,4 +1,4 @@
-"""ffprobe metadata helpers."""
+"""Small ffprobe metadata helper."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ class MediaInfo:
 def probe(path: Path, *, ffprobe_bin: str = "ffprobe", timeout: float = 60.0) -> MediaInfo:
     path = Path(path)
     if not path.is_file():
-        raise MediaCommandError(f"Media file does not exist: {path}")
+        raise MediaCommandError(f"媒体文件不存在: {path}")
     command = [
         ffprobe_bin,
         "-v",
@@ -54,32 +54,24 @@ def probe(path: Path, *, ffprobe_bin: str = "ffprobe", timeout: float = 60.0) ->
             check=False,
         )
     except FileNotFoundError as exc:
-        raise MediaCommandError(f"ffprobe not found: {ffprobe_bin}", command=command) from exc
+        raise MediaCommandError(f"ffprobe 不存在: {ffprobe_bin}", command=command) from exc
     except subprocess.TimeoutExpired as exc:
-        raise MediaCommandError("ffprobe timed out", command=command) from exc
+        raise MediaCommandError("ffprobe 超时", command=command) from exc
     if completed.returncode != 0:
-        raise MediaCommandError(
-            "ffprobe failed",
-            command=command,
-            stderr=completed.stderr,
-        )
+        raise MediaCommandError("ffprobe 读取媒体失败", command=command, stderr=completed.stderr)
     try:
         raw = json.loads(completed.stdout)
         duration = float(raw["format"]["duration"])
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
-        raise MediaCommandError("ffprobe returned invalid metadata", command=command) from exc
+        raise MediaCommandError("ffprobe 返回信息无效", command=command) from exc
     if not math.isfinite(duration) or duration <= 0:
-        raise MediaCommandError(
-            "ffprobe returned a non-positive or non-finite duration",
-            command=command,
-        )
+        raise MediaCommandError("媒体时长无效", command=command)
     streams = raw.get("streams") if isinstance(raw.get("streams"), list) else []
-    format_name = str(raw.get("format", {}).get("format_name", ""))
     return MediaInfo(
         path=path,
         duration=duration,
         streams=streams,
-        format_name=format_name,
+        format_name=str(raw.get("format", {}).get("format_name", "")),
         raw=raw,
     )
 

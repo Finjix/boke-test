@@ -1,52 +1,59 @@
-"""Tkinter settings panel for the MiniMax-only workflow."""
+"""The only configurable credential exposed by the desktop UI."""
 
 from __future__ import annotations
 
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk
-from typing import Any
+from typing import Callable
 
 from config import AppConfig
-from utils.settings_store import EDITABLE_SETTING_NAMES, SettingsStore
+from utils.settings_store import SETTINGS_FILENAME, SettingsStore
 
 
 class SettingsPanel(ttk.LabelFrame):
-    """Expose the single credential needed by the active pipeline."""
-
     def __init__(
         self,
         master: tk.Misc,
         config: AppConfig,
         *,
         settings_path: Path | None = None,
+        on_error: Callable[[object], None] | None = None,
     ) -> None:
-        super().__init__(master, text="MiniMax 设置", padding=8)
-        self._store = SettingsStore(settings_path)
-        stored = self._store.load()
-        self._vars: dict[str, tk.StringVar] = {}
-
-        ttk.Label(self, text="MiniMax API Key").grid(
-            row=0, column=0, sticky="w", padx=(0, 8), pady=3
+        super().__init__(master, text="MiniMax", padding=8)
+        root = Path(__file__).resolve().parents[1]
+        self._store = SettingsStore(
+            settings_path or root / SETTINGS_FILENAME
         )
-        variable = tk.StringVar(
+        self._on_error = on_error
+        stored = self._store.load()
+        self.key_var = tk.StringVar(
             value=stored.get("minimax_api_key") or config.minimax_api_key
         )
-        self._vars["minimax_api_key"] = variable
-        ttk.Entry(self, textvariable=variable, width=58, show="*").grid(
-            row=0, column=1, sticky="ew", pady=3
+        ttk.Label(self, text="API Key").grid(
+            row=0, column=0, sticky="w", padx=(0, 8)
         )
+        self.key_entry = ttk.Entry(self, textvariable=self.key_var, show="*")
+        self.key_entry.grid(row=0, column=1, sticky="ew")
+        self.save_button = ttk.Button(
+            self,
+            text="保存",
+            command=self._save_from_ui,
+        )
+        self.save_button.grid(row=0, column=2, padx=(8, 0))
         self.columnconfigure(1, weight=1)
 
-    def get_overrides(self) -> dict[str, str]:
-        return {
-            name: self._vars[name].get().strip()
-            for name in EDITABLE_SETTING_NAMES
-            if name in self._vars
-        }
-
-    def get_non_empty_overrides(self) -> dict[str, Any]:
-        return {name: value for name, value in self.get_overrides().items() if value}
+    def get_api_key(self) -> str:
+        return self.key_var.get().strip()
 
     def save(self) -> None:
-        self._store.save(self.get_overrides())
+        self._store.save({"minimax_api_key": self.get_api_key()})
+
+    def _save_from_ui(self) -> None:
+        try:
+            self.save()
+        except Exception as exc:
+            if self._on_error is not None:
+                self._on_error(exc)
+            else:
+                raise

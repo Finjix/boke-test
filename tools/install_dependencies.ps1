@@ -15,7 +15,7 @@ $PythonArchive = Join-Path $DownloadRoot "python-3.13.15-amd64.zip"
 $PythonUrl = "https://www.python.org/ftp/python/3.13.15/python-3.13.15-amd64.zip"
 # SHA-256 for the official CPython 3.13.15 AMD64 ZIP package.
 $PythonSha256 = "6479223746cdfb79d25865110d6f524ac98de081324e119af1dc3ae36bddc7a5"
-$ReadyMarker = Join-Path $RuntimeDir ".project-ready"
+$ReadyMarker = Join-Path $RuntimeDir ".project-ready-v2"
 
 function Get-Sha256 {
     param(

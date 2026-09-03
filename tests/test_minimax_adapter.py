@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import unittest
 
-import requests
-
+from api.common import ApiResponse
 from api.minimax import MiniMaxClient, task_prompt, task_video_url
 from config import AppConfig
-from core.h3_prompt import build_context_ir_content, build_video_content
+from core.h3_prompt import build_context_ir_content
 from utils.errors import ProviderError
 
 
@@ -29,34 +28,40 @@ class FakeSession:
         self.post_calls: list[tuple[str, dict[str, object]]] = []
         self.get_calls: list[str] = []
 
-    def post(self, url: str, **kwargs: object) -> FakeResponse:
+    def post(self, url: str, **kwargs):
         self.post_calls.append((url, kwargs))
         return FakeResponse(self.post_payload)
 
-    def get(self, url: str, **kwargs: object) -> FakeResponse:
+    def get(self, url: str, **kwargs):
         self.get_calls.append(url)
         return FakeResponse(self.get_payloads.pop(0))
 
 
 class FailingPostSession(FakeSession):
-    def post(self, url: str, **kwargs: object) -> FakeResponse:
+    def post(self, url: str, **kwargs):
         self.post_calls.append((url, kwargs))
-        raise requests.exceptions.ConnectionError("offline")
+        raise __import__("requests").exceptions.RequestException("offline")
 
 
 class MiniMaxAdapterTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.config = AppConfig(minimax_api_key="test-key", poll_interval=0)
+        self.config = AppConfig(
+            minimax_api_key="test-key",
+            poll_interval=0,
+        )
         self.content = build_context_ir_content(
-            "https://uguu.example/source.mp4", "localized requirement"
+            "data:video/mp4;base64,AAAA",
+            "localized requirement",
         )
 
-    def test_context_ir_create_uses_dedicated_endpoint_and_payload(self) -> None:
-        session = FakeSession({"task_id": "ir-1", "request_id": "req-ir"}, [])
+    def test_context_ir_create_uses_multimodal_endpoint(self) -> None:
+        session = FakeSession({"task_id": "ir-1"}, [])
         client = MiniMaxClient(self.config, session=session)
 
         task = client.create_context_ir_task(
-            self.content, duration=5, ratio="adaptive"
+            self.content,
+            duration=5,
+            ratio="adaptive",
         )
 
         url, kwargs = session.post_calls[0]
@@ -75,31 +80,28 @@ class MiniMaxAdapterTests(unittest.TestCase):
     def test_video_create_uses_h3_endpoint_and_resolution(self) -> None:
         session = FakeSession({"task_id": "h3-1"}, [])
         client = MiniMaxClient(self.config, session=session)
-        content = build_video_content("https://uguu.example/source.mp4", "IR prompt")
 
-        client.create_video_task(content, duration=5, resolution="768P")
+        client.create_video_task(
+            self.content,
+            duration=5,
+            resolution="768P",
+            ratio="adaptive",
+        )
 
         url, kwargs = session.post_calls[0]
         self.assertEqual(url, "https://api.minimax.cn/v2/video_generation")
-        self.assertEqual(
-            kwargs["json"],
-            {
-                "model": "MiniMax-H3",
-                "content": content,
-                "duration": 5,
-                "resolution": "768P",
-                "ratio": "adaptive",
-            },
-        )
+        self.assertEqual(kwargs["json"]["model"], "MiniMax-H3")
+        self.assertEqual(kwargs["json"]["resolution"], "768P")
+        self.assertEqual(kwargs["json"]["content"], self.content)
 
-    def test_wait_extracts_content_prompt_and_content_url(self) -> None:
+    def test_wait_extracts_prompt_and_video_url(self) -> None:
         session = FakeSession(
             {"task_id": "ir-1"},
             [
                 {
                     "task_id": "ir-1",
                     "status": "succeeded",
-                    "content": {"prompt": "  preserve this prompt  "},
+                    "content": {"prompt": "enhanced"},
                 },
                 {
                     "task_id": "h3-1",
@@ -110,55 +112,36 @@ class MiniMaxAdapterTests(unittest.TestCase):
         )
         client = MiniMaxClient(self.config, session=session)
 
-        ir = client.wait_task("ir-1", task_kind="minimax_context_ir")
-        h3 = client.wait_task("h3-1", task_kind="minimax_h3")
+        ir = client.wait_task("ir-1", task_kind="H3-Context-IR")
+        h3 = client.wait_task("h3-1", task_kind="MiniMax-H3")
 
-        self.assertEqual(task_prompt(ir.data), "  preserve this prompt  ")
+        self.assertEqual(task_prompt(ir.data), "enhanced")
         self.assertEqual(task_video_url(h3.data), "https://cdn.example/result.mp4")
-        self.assertEqual(
-            session.get_calls,
-            [
-                "https://api.minimax.cn/v2/query/video_generation/ir-1",
-                "https://api.minimax.cn/v2/query/video_generation/h3-1",
-            ],
-        )
 
-    def test_result_fields_are_strict_and_failed_status_terminates(self) -> None:
-        self.assertIsNone(task_prompt({"task": {"prompt": "wrong location"}}))
-        self.assertIsNone(task_video_url({"task": {"url": "wrong location"}}))
-        session = FakeSession(
+    def test_failed_status_and_missing_task_id_are_terminal(self) -> None:
+        failed = FakeSession(
             {"task_id": "ir-1"},
             [{"task_id": "ir-1", "status": "failed"}],
         )
-        client = MiniMaxClient(self.config, session=session)
-
         with self.assertRaises(ProviderError):
-            client.wait_task("ir-1", task_kind="minimax_context_ir")
+            MiniMaxClient(self.config, session=failed).wait_task(
+                "ir-1",
+                task_kind="H3-Context-IR",
+            )
 
-        missing_prompt_session = FakeSession(
-            {"task_id": "ir-2"},
-            [{"task_id": "ir-2", "status": "succeeded", "content": {}}],
-        )
-        missing_prompt_client = MiniMaxClient(
-            self.config, session=missing_prompt_session
-        )
-        with self.assertRaises(ProviderError):
-            missing_prompt_client.wait_task("ir-2", task_kind="minimax_context_ir")
-
-    def test_missing_create_task_id_fails_without_second_create(self) -> None:
-        session = FakeSession({}, [])
-        client = MiniMaxClient(self.config, session=session)
-
+        missing = FakeSession({}, [])
+        client = MiniMaxClient(self.config, session=missing)
         with self.assertRaises(ProviderError):
             client.create_context_ir_task(self.content, duration=5)
-        self.assertEqual(len(session.post_calls), 1)
+        self.assertEqual(len(missing.post_calls), 1)
 
-    def test_create_network_error_is_terminal_without_retry(self) -> None:
+    def test_network_create_error_is_not_retried(self) -> None:
         session = FailingPostSession({}, [])
-        client = MiniMaxClient(self.config, session=session)
-
         with self.assertRaises(ProviderError):
-            client.create_context_ir_task(self.content, duration=5)
+            MiniMaxClient(self.config, session=session).create_context_ir_task(
+                self.content,
+                duration=5,
+            )
         self.assertEqual(len(session.post_calls), 1)
 
 

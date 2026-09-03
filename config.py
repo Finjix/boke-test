@@ -1,28 +1,33 @@
-"""Runtime configuration for the MiniMax H3-Context-IR application."""
+"""Small runtime configuration for the MiniMax H3 desktop app."""
 
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Mapping
 
 try:
     from dotenv import load_dotenv
-except ModuleNotFoundError:  # pragma: no cover - dependency is declared in requirements
+except ModuleNotFoundError:  # pragma: no cover - dependency is installed by bootstrap
     load_dotenv = None
 
 from utils.errors import ConfigurationError
 
 
+APP_VERSION = "2.0.0"
 FIXED_MINIMAX_H3_MODEL = "MiniMax-H3"
 MINIMAX_CN_BASE_URL = "https://api.minimax.cn"
 MINIMAX_H3_DEFAULT_RESOLUTION = "768P"
 MINIMAX_H3_RESOLUTIONS = frozenset({"768P", "2K"})
-MINIMAX_VIDEO_MAX_FILE_MIB = 50
-MINIMAX_SEGMENT_MIN_DURATION_SECONDS = 3
+
+MINIMAX_SOURCE_MIN_DURATION_SECONDS = 3.0
+MINIMAX_SOURCE_MAX_DURATION_SECONDS = 15.0
 MINIMAX_GENERATION_MIN_DURATION_SECONDS = 4
-MINIMAX_MAX_DURATION_SECONDS = 15
+MINIMAX_GENERATION_MAX_DURATION_SECONDS = 15
+MINIMAX_VIDEO_MAX_FILE_BYTES = 50 * 1024 * 1024
+MINIMAX_IMAGE_MAX_FILE_BYTES = 30 * 1024 * 1024
+MINIMAX_MAX_REQUEST_BYTES = 64 * 1024 * 1024
 
 
 def _text(env: Mapping[str, str], name: str, default: str = "") -> str:
@@ -45,7 +50,12 @@ def _float(env: Mapping[str, str], name: str, default: float) -> float:
         raise ConfigurationError(f"{name} must be a number") from exc
 
 
-def _path_from_env(env: Mapping[str, str], name: str, default: Path, base_dir: Path) -> Path:
+def _path_from_env(
+    env: Mapping[str, str],
+    name: str,
+    default: Path,
+    base_dir: Path,
+) -> Path:
     value = _text(env, name, str(default))
     path = Path(value).expanduser()
     return path if path.is_absolute() else base_dir / path
@@ -72,7 +82,7 @@ def _tool_from_env(
 
 @dataclass(frozen=True)
 class AppConfig:
-    """Validated settings for the two-call MiniMax workflow."""
+    """Settings that are not exposed as extra GUI controls."""
 
     minimax_api_key: str = ""
     minimax_base_url: str = MINIMAX_CN_BASE_URL
@@ -80,14 +90,12 @@ class AppConfig:
     minimax_task_timeout: int = 7200
     minimax_resolution: str = MINIMAX_H3_DEFAULT_RESOLUTION
 
-    uguu_upload_url: str = "https://uguu.se/upload"
-    uguu_max_file_mib: int = MINIMAX_VIDEO_MAX_FILE_MIB
-    uguu_expire_hours: int = 3
-
     http_timeout: float = 180.0
     poll_interval: float = 10.0
     work_dir: Path = Path("work")
+    output_dir: Path = Path("output")
     ffprobe_bin: str = "ffprobe"
+    ffmpeg_bin: str = "ffmpeg"
 
     def __repr__(self) -> str:  # pragma: no cover - defensive secret hygiene
         return (
@@ -96,12 +104,10 @@ class AppConfig:
             f"minimax_model={self.minimax_model!r}, "
             f"minimax_task_timeout={self.minimax_task_timeout!r}, "
             f"minimax_resolution={self.minimax_resolution!r}, "
-            f"uguu_upload_url={self.uguu_upload_url!r}, "
-            f"uguu_max_file_mib={self.uguu_max_file_mib!r}, "
-            f"uguu_expire_hours={self.uguu_expire_hours!r}, "
             f"http_timeout={self.http_timeout!r}, "
             f"poll_interval={self.poll_interval!r}, "
-            f"work_dir={str(self.work_dir)!r})"
+            f"work_dir={str(self.work_dir)!r}, "
+            f"output_dir={str(self.output_dir)!r})"
         )
 
     @classmethod
@@ -130,16 +136,23 @@ class AppConfig:
             minimax_resolution=_text(
                 source, "MINIMAX_RESOLUTION", MINIMAX_H3_DEFAULT_RESOLUTION
             ).upper(),
-            uguu_upload_url=_text(source, "UGUU_UPLOAD_URL", "https://uguu.se/upload"),
-            uguu_max_file_mib=_int(
-                source, "UGUU_MAX_FILE_MIB", MINIMAX_VIDEO_MAX_FILE_MIB
-            ),
-            uguu_expire_hours=_int(source, "UGUU_EXPIRE_HOURS", 3),
             http_timeout=_float(source, "HTTP_TIMEOUT", 180.0),
             poll_interval=_float(source, "POLL_INTERVAL", 10.0),
             work_dir=_path_from_env(source, "WORK_DIR", Path("work"), root),
+            output_dir=_path_from_env(source, "OUTPUT_DIR", Path("output"), root),
             ffprobe_bin=_tool_from_env(
-                source, "FFPROBE_BIN", "ffprobe", root, "tools/ffmpeg/bin/ffprobe.exe"
+                source,
+                "FFPROBE_BIN",
+                "ffprobe",
+                root,
+                "tools/ffmpeg/bin/ffprobe.exe",
+            ),
+            ffmpeg_bin=_tool_from_env(
+                source,
+                "FFMPEG_BIN",
+                "ffmpeg",
+                root,
+                "tools/ffmpeg/bin/ffmpeg.exe",
             ),
         )
         config.validate_values()
@@ -158,21 +171,13 @@ class AppConfig:
             raise ConfigurationError(
                 f"MINIMAX_RESOLUTION must be one of {sorted(MINIMAX_H3_RESOLUTIONS)}"
             )
-        if not self.uguu_upload_url.startswith("https://"):
-            raise ConfigurationError("UGUU_UPLOAD_URL must be an HTTPS URL")
-        if self.uguu_max_file_mib <= 0 or self.uguu_max_file_mib > MINIMAX_VIDEO_MAX_FILE_MIB:
-            raise ConfigurationError(
-                f"UGUU_MAX_FILE_MIB must be between 1 and {MINIMAX_VIDEO_MAX_FILE_MIB}"
-            )
-        if self.uguu_expire_hours <= 0:
-            raise ConfigurationError("UGUU_EXPIRE_HOURS must be positive")
         if self.http_timeout <= 0 or self.poll_interval < 0:
             raise ConfigurationError(
                 "HTTP_TIMEOUT must be positive and POLL_INTERVAL non-negative"
             )
 
     def with_overrides(self, **values: object) -> "AppConfig":
-        allowed = set(self.__dataclass_fields__)
+        allowed = {item.name for item in fields(self)}
         unknown = set(values) - allowed
         if unknown:
             raise ConfigurationError(f"Unknown configuration fields: {sorted(unknown)}")
@@ -181,7 +186,4 @@ class AppConfig:
         return updated
 
     def missing_runtime_values(self) -> list[str]:
-        return ["MINIMAX_API_KEY"] if not self.minimax_api_key else []
-
-    def missing_h3_runtime_values(self) -> list[str]:
-        return self.missing_runtime_values()
+        return ["MINIMAX_API_KEY"] if not self.minimax_api_key.strip() else []

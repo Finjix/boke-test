@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -13,24 +12,19 @@ import requests
 from api.common import ApiResponse, response_request_id
 from config import (
     FIXED_MINIMAX_H3_MODEL,
+    MINIMAX_GENERATION_MAX_DURATION_SECONDS,
     MINIMAX_GENERATION_MIN_DURATION_SECONDS,
     MINIMAX_H3_RESOLUTIONS,
-    MINIMAX_MAX_DURATION_SECONDS,
     AppConfig,
 )
-from utils.artifacts import persist_raw_json, persist_raw_text
+from core.h3_prompt import ensure_payload_size
 from utils.errors import PipelineCancelled, ProviderError, ValidationError
-from utils.ids import new_request_id
-from utils.logger import JobLogger
 
 
 @dataclass(frozen=True)
 class MiniMaxTask:
     task_id: str
-    request_id: str
-    raw: dict[str, Any]
-    task_kind: str
-    raw_path: Path | None = None
+    request_id: str = ""
 
 
 def _task_payload(data: Any) -> dict[str, Any]:
@@ -44,8 +38,7 @@ def task_status(data: Any) -> str:
 
 
 def task_video_url(data: Any) -> str | None:
-    task = _task_payload(data)
-    content = task.get("content")
+    content = _task_payload(data).get("content")
     if isinstance(content, dict):
         value = content.get("url")
         if isinstance(value, str) and value.strip():
@@ -54,8 +47,7 @@ def task_video_url(data: Any) -> str | None:
 
 
 def task_prompt(data: Any) -> str | None:
-    task = _task_payload(data)
-    content = task.get("content")
+    content = _task_payload(data).get("content")
     if isinstance(content, dict):
         value = content.get("prompt")
         if isinstance(value, str) and value.strip():
@@ -68,16 +60,12 @@ class MiniMaxClient:
         self,
         config: AppConfig,
         *,
-        logger: JobLogger | None = None,
         session: requests.Session | None = None,
         sleeper: Any = time.sleep,
     ) -> None:
         self.config = config
-        self.logger = logger
         self.sleeper = sleeper
         self.session = session or requests.Session()
-        # The domestic endpoint is directly reachable on this host. Custom
-        # endpoints retain requests' normal proxy behavior.
         if urlparse(self.base_url).hostname == "api.minimax.cn":
             self.session.trust_env = False
 
@@ -91,27 +79,24 @@ class MiniMaxClient:
             "Content-Type": "application/json",
         }
 
-    def _validate_common(self, content: list[dict[str, Any]], duration: int) -> None:
+    def _validate_common(self, content: list[dict[str, object]], duration: int) -> None:
         if self.config.minimax_model != FIXED_MINIMAX_H3_MODEL:
             raise ProviderError(
-                f"MiniMax model must be {FIXED_MINIMAX_H3_MODEL}",
+                f"模型必须为 {FIXED_MINIMAX_H3_MODEL}",
                 provider="minimax",
                 error_code="MODEL_NOT_SUPPORTED",
-                retryable=False,
             )
-        if not self.config.minimax_api_key:
+        if not self.config.minimax_api_key.strip():
             raise ProviderError(
-                "MINIMAX_API_KEY is empty",
+                "MiniMax API Key 为空",
                 provider="minimax",
                 error_code="API_KEY_MISSING",
-                retryable=False,
             )
         if not isinstance(content, list) or not content:
             raise ProviderError(
-                "MiniMax content cannot be empty",
+                "MiniMax content 为空",
                 provider="minimax",
                 error_code="CONTENT_EMPTY",
-                retryable=False,
             )
         if not any(
             isinstance(item, dict)
@@ -121,36 +106,31 @@ class MiniMaxClient:
             for item in content
         ):
             raise ProviderError(
-                "MiniMax content must include a non-empty text item",
+                "MiniMax content 缺少文本提示词",
                 provider="minimax",
                 error_code="PROMPT_EMPTY",
-                retryable=False,
             )
-        if not isinstance(duration, int) or isinstance(duration, bool):
+        if (
+            not isinstance(duration, int)
+            or isinstance(duration, bool)
+            or not MINIMAX_GENERATION_MIN_DURATION_SECONDS
+            <= duration
+            <= MINIMAX_GENERATION_MAX_DURATION_SECONDS
+        ):
             raise ProviderError(
-                "MiniMax duration must be an integer",
+                "MiniMax 生成时长必须为 4–15 秒整数",
                 provider="minimax",
                 error_code="INVALID_DURATION",
-                retryable=False,
-            )
-        if not MINIMAX_GENERATION_MIN_DURATION_SECONDS <= duration <= MINIMAX_MAX_DURATION_SECONDS:
-            raise ProviderError(
-                "MiniMax duration must be an integer from 4 to 15 seconds",
-                provider="minimax",
-                error_code="INVALID_DURATION",
-                retryable=False,
             )
 
     def _create_task(
         self,
         *,
         endpoint: str,
-        payload: dict[str, Any],
+        payload: dict[str, object],
         task_kind: str,
-        raw_stage: str,
-        raw_dir: Path | None,
     ) -> MiniMaxTask:
-        request_id = new_request_id()
+        ensure_payload_size(payload)
         try:
             response = self.session.post(
                 f"{self.base_url}{endpoint}",
@@ -160,88 +140,64 @@ class MiniMaxClient:
             )
         except requests.exceptions.RequestException as exc:
             raise ProviderError(
-                f"MiniMax {task_kind} create request failed: {exc}",
+                f"{task_kind} 请求失败",
                 provider=task_kind,
-                request_id=request_id,
-                error_code="CREATE_OUTCOME_UNKNOWN",
-                retryable=False,
+                error_code="CREATE_REQUEST_FAILED",
             ) from exc
 
-        raw_path: Path | None = None
         try:
             data = response.json()
         except ValueError as exc:
-            if raw_dir is not None:
-                raw_path = persist_raw_text(
-                    raw_dir,
-                    raw_stage,
-                    getattr(response, "text", ""),
-                    request_id=request_id,
-                    extension="txt",
-                )
             raise ProviderError(
-                f"MiniMax {task_kind} create response is not JSON",
+                f"{task_kind} 返回内容无效",
                 provider=task_kind,
                 status_code=int(getattr(response, "status_code", 0) or 0),
-                request_id=request_id,
-                raw_response_path=str(raw_path) if raw_path else None,
                 error_code="INVALID_RESPONSE",
-                retryable=False,
             ) from exc
-        if raw_dir is not None:
-            raw_path = persist_raw_json(raw_dir, raw_stage, data, request_id=request_id)
         status_code = int(getattr(response, "status_code", 200) or 200)
+        request_id = response_request_id(data) if isinstance(data, dict) else ""
         if status_code < 200 or status_code >= 300:
+            detail = ""
+            if isinstance(data, dict):
+                error = data.get("error")
+                if isinstance(error, dict):
+                    detail = str(error.get("message") or "")
+            suffix = f": {detail}" if detail else ""
             raise ProviderError(
-                f"MiniMax {task_kind} create HTTP {status_code}",
+                f"{task_kind} 请求被拒绝{suffix}",
                 provider=task_kind,
                 status_code=status_code,
                 request_id=request_id,
-                raw_response_path=str(raw_path) if raw_path else None,
-                payload=data,
-                retryable=False,
+                error_code="CREATE_FAILED",
             )
         if not isinstance(data, dict):
             raise ProviderError(
-                f"MiniMax {task_kind} create response is not an object",
+                f"{task_kind} 返回格式无效",
                 provider=task_kind,
-                request_id=request_id,
-                raw_response_path=str(raw_path) if raw_path else None,
                 error_code="INVALID_RESPONSE_OBJECT",
-                retryable=False,
             )
         task_id = data.get("task_id") or data.get("id")
         if not task_id and isinstance(data.get("task"), dict):
             task_id = data["task"].get("task_id") or data["task"].get("id")
         if not task_id:
             raise ProviderError(
-                f"MiniMax {task_kind} create response has no task_id",
+                f"{task_kind} 未返回任务 ID",
                 provider=task_kind,
                 request_id=request_id,
-                raw_response_path=str(raw_path) if raw_path else None,
                 error_code="TASK_ID_MISSING",
-                payload=data,
-                retryable=False,
             )
-        return MiniMaxTask(
-            task_id=str(task_id),
-            request_id=response_request_id(data, request_id),
-            raw=data,
-            task_kind=task_kind,
-            raw_path=raw_path,
-        )
+        return MiniMaxTask(str(task_id), request_id)
 
     def create_context_ir_task(
         self,
-        content: list[dict[str, Any]],
+        content: list[dict[str, object]],
         *,
         duration: int,
         ratio: str = "adaptive",
-        raw_dir: Path | None = None,
     ) -> MiniMaxTask:
         self._validate_common(content, duration)
         if not ratio:
-            raise ValidationError("MiniMax Context-IR ratio cannot be empty")
+            raise ValidationError("Context-IR 比例不能为空")
         return self._create_task(
             endpoint="/v2/h3_context_ir",
             payload={
@@ -250,31 +206,27 @@ class MiniMaxClient:
                 "duration": duration,
                 "ratio": ratio,
             },
-            task_kind="minimax_context_ir",
-            raw_stage="minimax_context_ir_create",
-            raw_dir=raw_dir,
+            task_kind="H3-Context-IR",
         )
 
     def create_video_task(
         self,
-        content: list[dict[str, Any]],
+        content: list[dict[str, object]],
         *,
         duration: int,
         resolution: str | None = None,
         ratio: str = "adaptive",
-        raw_dir: Path | None = None,
     ) -> MiniMaxTask:
         self._validate_common(content, duration)
         chosen_resolution = (resolution or self.config.minimax_resolution).upper()
         if chosen_resolution not in MINIMAX_H3_RESOLUTIONS:
             raise ProviderError(
-                "MiniMax H3 resolution must be 768P or 2K",
+                "H3 分辨率必须为 768P 或 2K",
                 provider="minimax_h3",
                 error_code="INVALID_RESOLUTION",
-                retryable=False,
             )
         if not ratio:
-            raise ValidationError("MiniMax H3 ratio cannot be empty")
+            raise ValidationError("H3 比例不能为空")
         return self._create_task(
             endpoint="/v2/video_generation",
             payload={
@@ -284,19 +236,10 @@ class MiniMaxClient:
                 "resolution": chosen_resolution,
                 "ratio": ratio,
             },
-            task_kind="minimax_h3",
-            raw_stage="minimax_h3_create",
-            raw_dir=raw_dir,
+            task_kind="MiniMax-H3",
         )
 
-    def get_task(
-        self,
-        task_id: str,
-        *,
-        task_kind: str = "minimax",
-        raw_dir: Path | None = None,
-    ) -> ApiResponse:
-        request_id = new_request_id()
+    def get_task(self, task_id: str, *, task_kind: str) -> ApiResponse:
         try:
             response = self.session.get(
                 f"{self.base_url}/v2/query/video_generation/{task_id}",
@@ -305,70 +248,36 @@ class MiniMaxClient:
             )
         except requests.exceptions.RequestException as exc:
             raise ProviderError(
-                f"MiniMax {task_kind} query request failed: {exc}",
+                f"{task_kind} 查询失败",
                 provider=task_kind,
-                request_id=request_id,
                 error_code="QUERY_REQUEST_FAILED",
-                retryable=False,
             ) from exc
-
-        raw_path: Path | None = None
         try:
             data = response.json()
         except ValueError as exc:
-            if raw_dir is not None:
-                raw_path = persist_raw_text(
-                    raw_dir,
-                    f"{task_kind}_query",
-                    getattr(response, "text", ""),
-                    request_id=request_id,
-                    extension="txt",
-                )
             raise ProviderError(
-                f"MiniMax {task_kind} query response is not JSON",
+                f"{task_kind} 查询返回内容无效",
                 provider=task_kind,
                 status_code=int(getattr(response, "status_code", 0) or 0),
-                request_id=request_id,
-                raw_response_path=str(raw_path) if raw_path else None,
                 error_code="INVALID_RESPONSE",
-                retryable=False,
             ) from exc
-        if raw_dir is not None:
-            raw_path = persist_raw_json(
-                raw_dir, f"{task_kind}_query", data, request_id=request_id
-            )
         status_code = int(getattr(response, "status_code", 200) or 200)
-        if status_code < 200 or status_code >= 300:
+        request_id = response_request_id(data) if isinstance(data, dict) else ""
+        if status_code < 200 or status_code >= 300 or not isinstance(data, dict):
             raise ProviderError(
-                f"MiniMax {task_kind} query HTTP {status_code}",
+                f"{task_kind} 查询失败",
                 provider=task_kind,
                 status_code=status_code,
                 request_id=request_id,
-                raw_response_path=str(raw_path) if raw_path else None,
-                payload=data,
-                retryable=False,
+                error_code="QUERY_FAILED",
             )
-        if not isinstance(data, dict):
-            raise ProviderError(
-                f"MiniMax {task_kind} query response is not an object",
-                provider=task_kind,
-                request_id=request_id,
-                raw_response_path=str(raw_path) if raw_path else None,
-                error_code="INVALID_RESPONSE_OBJECT",
-                retryable=False,
-            )
-        return ApiResponse(
-            data=data,
-            request_id=response_request_id(data, request_id),
-            raw_path=raw_path,
-        )
+        return ApiResponse(data=data, request_id=request_id)
 
     def wait_task(
         self,
         task_id: str,
         *,
-        task_kind: str = "minimax",
-        raw_dir: Path | None = None,
+        task_kind: str,
         cancel_event: Any = None,
         max_wait_seconds: float | None = None,
     ) -> ApiResponse:
@@ -379,89 +288,52 @@ class MiniMaxClient:
         )
         if wait_seconds <= 0:
             raise ProviderError(
-                f"MiniMax {task_kind} task wait timeout must be positive",
+                f"{task_kind} 等待超时配置无效",
                 provider=task_kind,
                 error_code="TASK_TIMEOUT",
-                retryable=False,
             )
         deadline = time.monotonic() + wait_seconds
         while True:
             if cancel_event is not None and cancel_event.is_set():
-                raise PipelineCancelled(f"Cancellation requested while waiting for {task_kind}")
+                raise PipelineCancelled(f"正在等待 {task_kind} 时已取消")
             if time.monotonic() >= deadline:
                 raise ProviderError(
-                    f"MiniMax {task_kind} task polling timed out",
+                    f"{task_kind} 等待超时",
                     provider=task_kind,
                     error_code="TASK_TIMEOUT",
-                    retryable=False,
                 )
-            response = self.get_task(
-                task_id,
-                task_kind=task_kind,
-                raw_dir=raw_dir,
-            )
+            response = self.get_task(task_id, task_kind=task_kind)
             status = task_status(response.data)
             if status == "succeeded":
-                if task_kind == "minimax_context_ir" and not task_prompt(response.data):
+                if task_kind == "H3-Context-IR" and not task_prompt(response.data):
                     raise ProviderError(
-                        "MiniMax H3-Context-IR succeeded without task.content.prompt",
+                        "H3-Context-IR 未返回结构提示词",
                         provider=task_kind,
                         request_id=response.request_id,
-                        raw_response_path=(
-                            str(response.raw_path) if response.raw_path else None
-                        ),
                         error_code="PROMPT_MISSING",
-                        retryable=False,
                     )
-                if task_kind == "minimax_h3" and not task_video_url(response.data):
+                if task_kind == "MiniMax-H3" and not task_video_url(response.data):
                     raise ProviderError(
-                        "MiniMax H3 succeeded without task.content.url",
+                        "MiniMax-H3 未返回视频地址",
                         provider=task_kind,
                         request_id=response.request_id,
-                        raw_response_path=(
-                            str(response.raw_path) if response.raw_path else None
-                        ),
                         error_code="VIDEO_URL_MISSING",
-                        retryable=False,
                     )
                 return response
             if status in {"failed", "cancelled", "expired"}:
                 raise ProviderError(
-                    f"MiniMax {task_kind} task ended with status {status}",
+                    f"{task_kind} 处理失败",
                     provider=task_kind,
-                    error_code=status.upper(),
                     request_id=response.request_id,
-                    raw_response_path=str(response.raw_path) if response.raw_path else None,
-                    payload=response.data,
-                    retryable=False,
+                    error_code=status.upper(),
                 )
             if status not in {"queued", "running", "processing"}:
                 raise ProviderError(
-                    f"Unknown MiniMax {task_kind} task status: {status or '<empty>'}",
+                    f"{task_kind} 返回未知状态",
                     provider=task_kind,
-                    error_code="UNKNOWN_STATUS",
                     request_id=response.request_id,
-                    raw_response_path=str(response.raw_path) if response.raw_path else None,
-                    payload=response.data,
-                    retryable=False,
+                    error_code="UNKNOWN_STATUS",
                 )
             remaining = deadline - time.monotonic()
             if remaining > 0:
                 self.sleeper(min(self.config.poll_interval, remaining))
-
-    def check_access(self, *, raw_dir: Path | None = None) -> None:
-        del raw_dir
-        if not self.config.minimax_api_key:
-            raise ProviderError(
-                "MINIMAX_API_KEY is empty",
-                provider="minimax",
-                error_code="API_KEY_MISSING",
-                retryable=False,
-            )
-        if self.config.minimax_model != FIXED_MINIMAX_H3_MODEL:
-            raise ProviderError(
-                f"MiniMax model must be {FIXED_MINIMAX_H3_MODEL}",
-                provider="minimax",
-                error_code="MODEL_NOT_SUPPORTED",
-                retryable=False,
-            )
