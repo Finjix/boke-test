@@ -98,15 +98,19 @@ class ConfigAndUiContractTests(unittest.TestCase):
             has_reference_images=True,
         )
         self.assertIn("Gulf（Arabic）", prompt)
-        self.assertIn("本地化硬性验收规则", prompt)
+        self.assertIn("镜头双轨契约", prompt)
         self.assertIn("逐镜头将所有可见环境重建", prompt)
         self.assertIn("每一处可辨识的文字都必须使用「Arabic」", prompt)
         self.assertIn("不得保留或生成源语言文字、拉丁字母招牌", prompt)
-        self.assertIn("只替换人物、服装或对白", prompt)
-        self.assertIn("原始视频是动作、位置和镜头的唯一依据", prompt)
-        self.assertIn("全部参考图仅用于人物、服装、材质、色彩与整体美术的外观风格参考", prompt)
-        self.assertIn("绝不能复制或推断其中的动作、姿势、人物位置", prompt)
-        self.assertIn("必须完全以原始视频为准", prompt)
+        self.assertIn("镜头双轨契约", prompt)
+        self.assertIn("时空连续性轨", prompt)
+        self.assertIn("视觉本地化轨", prompt)
+        self.assertIn("同一批人物、服装、道具、材质、环境和可辨识文字", prompt)
+        self.assertIn("不得把源视频的地域视觉特征当作默认保留项", prompt)
+        self.assertIn("若只翻译了文字、车牌或语音", prompt)
+        self.assertIn("参考图只为视觉本地化轨提供", prompt)
+        self.assertIn("不能复制或推断其中的动作、姿势、人物位置", prompt)
+        self.assertIn("所有时空信息始终完全以原始视频为准", prompt)
         self.assertIn(
             f"不得超过 {MAX_CONTEXT_IR_ANALYSIS_CHARS} 个字符",
             prompt,
@@ -118,9 +122,10 @@ class ConfigAndUiContractTests(unittest.TestCase):
         prompt = build_generation_prompt(locale, "Context-IR returned analysis")
         self.assertIn("Context-IR returned analysis", prompt)
         self.assertIn("无论上述分析如何表述", prompt)
-        self.assertIn("本地化优先级高于复刻源视频的背景外观", prompt)
+        self.assertIn("镜头双轨契约", prompt)
         self.assertIn("不得保留或生成源语言文字、拉丁字母招牌", prompt)
-        self.assertIn("原始视频是动作、人物与物体位置", prompt)
+        self.assertIn("时空连续性轨", prompt)
+        self.assertIn("视觉本地化轨", prompt)
 
     def test_generation_prompt_rejects_overlong_context_ir_without_truncation(self) -> None:
         locale = locale_from_code("ar-SA")

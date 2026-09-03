@@ -183,7 +183,7 @@ class SimplifiedPipelineTests(unittest.TestCase):
             self.assertEqual(len(minimax.context_calls[0]["content"]), 2)
             generation_prompt = minimax.video_calls[0]["content"][0]["text"]
             self.assertIn("enhanced-ir-1", generation_prompt)
-            self.assertIn("本地化硬性验收规则", generation_prompt)
+            self.assertIn("镜头双轨契约", generation_prompt)
             self.assertIn("不得保留或生成源语言文字、拉丁字母招牌", generation_prompt)
             self.assertRegex(result.output_path.name, r"^\d{8}_\d{6}(?:_\d{2})?\.mp4$")
             self.assertTrue(result.output_path.is_file())
