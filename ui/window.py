@@ -9,7 +9,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, ttk
 
-from config import APP_VERSION, AppConfig
+from config import AppConfig
 from core.models import JobSpec, PipelineEvent, PipelineStage
 from core.pipeline import VideoLocalizationPipeline
 from language_config import (
@@ -17,7 +17,7 @@ from language_config import (
     H3_TARGET_LOCALES,
     locale_from_label,
 )
-from ui.settings import SettingsPanel
+from ui.settings import LABEL_COLUMN_WIDTH, SettingsPanel
 
 
 class VideoLocalizerWindow(tk.Tk):
@@ -28,7 +28,7 @@ class VideoLocalizerWindow(tk.Tk):
         settings_path: Path | None = None,
     ) -> None:
         super().__init__()
-        self.title(f"MiniMax H3 视频处理 v{APP_VERSION}")
+        self.title("视频本地化工具")
         self.geometry("680x520")
         self.minsize(600, 460)
         self.base_config = config
@@ -45,13 +45,8 @@ class VideoLocalizerWindow(tk.Tk):
     def _build(self) -> None:
         root = ttk.Frame(self, padding=14)
         root.pack(fill="both", expand=True)
+        root.columnconfigure(0, minsize=LABEL_COLUMN_WIDTH)
         root.columnconfigure(1, weight=1)
-
-        ttk.Label(
-            root,
-            text=f"MiniMax H3 视频处理   v{APP_VERSION}",
-            font=("Segoe UI", 12, "bold"),
-        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 12))
 
         self.settings = SettingsPanel(
             root,
@@ -59,7 +54,7 @@ class VideoLocalizerWindow(tk.Tk):
             settings_path=self.settings_path,
             on_error=self._set_error,
         )
-        self.settings.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        self.settings.grid(row=4, column=0, columnspan=3, sticky="ew", pady=5)
 
         self.video_var = tk.StringVar()
         self.person_var = tk.StringVar()
@@ -68,7 +63,7 @@ class VideoLocalizerWindow(tk.Tk):
 
         self.video_choose_button = self._asset_row(
             root,
-            2,
+            1,
             "视频",
             self.video_var,
             self._choose_video,
@@ -76,7 +71,7 @@ class VideoLocalizerWindow(tk.Tk):
         )
         self.person_choose_button = self._asset_row(
             root,
-            3,
+            2,
             "人物图",
             self.person_var,
             self._choose_person_image,
@@ -84,7 +79,7 @@ class VideoLocalizerWindow(tk.Tk):
         )
         self.scene_choose_button = self._asset_row(
             root,
-            4,
+            3,
             "场景图",
             self.scene_var,
             self._choose_scene_image,
@@ -92,7 +87,7 @@ class VideoLocalizerWindow(tk.Tk):
         )
 
         ttk.Label(root, text="目标地区").grid(
-            row=5, column=0, sticky="w", padx=(0, 10), pady=5
+            row=0, column=0, sticky="w", padx=(0, 10), pady=5
         )
         self.locale_combo = ttk.Combobox(
             root,
@@ -100,35 +95,21 @@ class VideoLocalizerWindow(tk.Tk):
             values=[locale.label for locale in H3_TARGET_LOCALES],
             state="readonly",
         )
-        self.locale_combo.grid(row=5, column=1, columnspan=2, sticky="ew", pady=5)
+        self.locale_combo.grid(row=0, column=1, columnspan=2, sticky="ew", pady=5)
 
-        status = ttk.LabelFrame(root, text="状态", padding=8)
-        status.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(12, 0))
-        status.columnconfigure(1, weight=1)
-        self.status_var = tk.StringVar(value="待处理")
-        self.progress_var = tk.DoubleVar(value=0)
-        ttk.Label(status, textvariable=self.status_var).grid(
-            row=0, column=0, sticky="w"
+        self.status_var = tk.StringVar(value="状态：待处理")
+        ttk.Label(root, textvariable=self.status_var).grid(
+            row=5, column=0, sticky="w", pady=(12, 0)
         )
-        ttk.Progressbar(
-            status,
-            maximum=100,
-            variable=self.progress_var,
-        ).grid(row=0, column=1, sticky="ew", padx=(12, 0))
 
-        ttk.Label(root, text="输出").grid(
-            row=7, column=0, sticky="w", padx=(0, 10), pady=8
-        )
-        self.output_var = tk.StringVar(value="-")
-        ttk.Label(root, textvariable=self.output_var).grid(
-            row=7, column=1, sticky="w", pady=8
-        )
         self.output_button = ttk.Button(
             root,
-            text="打开 output",
+            text="打开输出目录",
             command=self._open_output,
         )
-        self.output_button.grid(row=7, column=2, sticky="e", pady=8)
+        self.output_button.grid(
+            row=5, column=2, sticky="w", padx=(8, 0), pady=(12, 0)
+        )
 
         self.error_var = tk.StringVar()
         ttk.Label(
@@ -137,14 +118,14 @@ class VideoLocalizerWindow(tk.Tk):
             foreground="#b42318",
             wraplength=630,
             justify="left",
-        ).grid(row=8, column=0, columnspan=3, sticky="w", pady=(0, 8))
+        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(0, 8))
 
         self.start_button = ttk.Button(
             root,
             text="开始处理",
             command=self._start,
         )
-        self.start_button.grid(row=9, column=0, columnspan=3, pady=(4, 0))
+        self.start_button.grid(row=5, column=1, sticky="e", pady=(12, 0))
 
     def _asset_row(
         self,
@@ -237,9 +218,7 @@ class VideoLocalizerWindow(tk.Tk):
             self._set_error(exc)
             return
 
-        self.status_var.set("准备处理")
-        self.progress_var.set(0)
-        self.output_var.set("-")
+        self.status_var.set("状态：准备处理")
         self.cancel_event = threading.Event()
         self.pipeline = VideoLocalizationPipeline(
             config,
@@ -272,12 +251,9 @@ class VideoLocalizerWindow(tk.Tk):
         self.after(100, self._poll_events)
 
     def _handle_event(self, event: PipelineEvent) -> None:
-        self.status_var.set(event.message)
-        self.progress_var.set(event.progress)
+        self.status_var.set(f"状态：{event.message}")
         if event.error:
             self._set_error(event.error)
-        if event.output_path is not None:
-            self.output_var.set(f"output/{event.output_path.name}")
 
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
@@ -305,7 +281,7 @@ class VideoLocalizerWindow(tk.Tk):
             target.mkdir(parents=True, exist_ok=True)
             os.startfile(str(target))  # type: ignore[attr-defined]
         except OSError as exc:
-            self._set_error(f"无法打开 output: {exc}")
+            self._set_error(f"无法打开输出目录: {exc}")
 
     def _on_close(self) -> None:
         try:

@@ -11,7 +11,10 @@ from config import AppConfig
 from utils.settings_store import SETTINGS_FILENAME, SettingsStore
 
 
-class SettingsPanel(ttk.LabelFrame):
+LABEL_COLUMN_WIDTH = 140
+
+
+class SettingsPanel(ttk.Frame):
     def __init__(
         self,
         master: tk.Misc,
@@ -20,7 +23,7 @@ class SettingsPanel(ttk.LabelFrame):
         settings_path: Path | None = None,
         on_error: Callable[[object], None] | None = None,
     ) -> None:
-        super().__init__(master, text="MiniMax", padding=8)
+        super().__init__(master, padding=0)
         root = Path(__file__).resolve().parents[1]
         self._store = SettingsStore(
             settings_path or root / SETTINGS_FILENAME
@@ -30,8 +33,8 @@ class SettingsPanel(ttk.LabelFrame):
         self.key_var = tk.StringVar(
             value=stored.get("minimax_api_key") or config.minimax_api_key
         )
-        ttk.Label(self, text="API Key").grid(
-            row=0, column=0, sticky="w", padx=(0, 8)
+        ttk.Label(self, text="MiniMax API Key").grid(
+            row=0, column=0, sticky="w", padx=(0, 10)
         )
         self.key_entry = ttk.Entry(self, textvariable=self.key_var, show="*")
         self.key_entry.grid(row=0, column=1, sticky="ew")
@@ -41,6 +44,7 @@ class SettingsPanel(ttk.LabelFrame):
             command=self._save_from_ui,
         )
         self.save_button.grid(row=0, column=2, padx=(8, 0))
+        self.columnconfigure(0, minsize=LABEL_COLUMN_WIDTH)
         self.columnconfigure(1, weight=1)
 
     def get_api_key(self) -> str:

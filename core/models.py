@@ -70,9 +70,7 @@ class PipelineResult:
 @dataclass(frozen=True)
 class PipelineEvent:
     stage: PipelineStage
-    progress: int
     message: str = ""
-    output_path: Path | None = None
     error: str | None = None
 
 

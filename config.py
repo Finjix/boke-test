@@ -15,7 +15,6 @@ except ModuleNotFoundError:  # pragma: no cover - dependency is installed by boo
 from utils.errors import ConfigurationError
 
 
-APP_VERSION = "2.0.0"
 FIXED_MINIMAX_H3_MODEL = "MiniMax-H3"
 MINIMAX_CN_BASE_URL = "https://api.minimax.cn"
 MINIMAX_H3_DEFAULT_RESOLUTION = "768P"

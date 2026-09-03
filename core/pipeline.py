@@ -69,7 +69,7 @@ class VideoLocalizationPipeline:
             raise ValidationError("当前已有任务")
         self._busy = True
         try:
-            self._emit(PipelineStage.VALIDATING, 5, "校验输入")
+            self._emit(PipelineStage.VALIDATING, "校验输入")
             self._ensure_clients()
             if not skip_preflight:
                 require_preflight(run_preflight(self.config, spec))
@@ -143,7 +143,7 @@ class VideoLocalizationPipeline:
                 )
 
                 self._check_cancel()
-                self._emit(PipelineStage.ANALYZING, 20, "分析视频")
+                self._emit(PipelineStage.ANALYZING, "分析视频")
                 context_task = self.minimax_client.create_context_ir_task(
                     context_content,
                     duration=target_duration,
@@ -151,7 +151,6 @@ class VideoLocalizationPipeline:
                 )
                 self._emit(
                     PipelineStage.WAITING_FOR_ANALYSIS,
-                    35,
                     "等待结构提示词",
                 )
                 context_response = self.minimax_client.wait_task(
@@ -184,7 +183,7 @@ class VideoLocalizationPipeline:
                 )
 
                 self._check_cancel()
-                self._emit(PipelineStage.GENERATING, 50, "生成视频")
+                self._emit(PipelineStage.GENERATING, "生成视频")
                 video_task = self.minimax_client.create_video_task(
                     video_content,
                     duration=target_duration,
@@ -193,7 +192,6 @@ class VideoLocalizationPipeline:
                 )
                 self._emit(
                     PipelineStage.WAITING_FOR_GENERATION,
-                    70,
                     "等待视频生成",
                 )
                 video_response = self.minimax_client.wait_task(
@@ -210,7 +208,7 @@ class VideoLocalizationPipeline:
                     )
 
                 self._check_cancel()
-                self._emit(PipelineStage.DOWNLOADING, 90, "下载结果")
+                self._emit(PipelineStage.DOWNLOADING, "下载结果")
                 provider_output = temporary_dir / "provider_output.mp4"
                 download(
                     video_url,
@@ -228,9 +226,7 @@ class VideoLocalizationPipeline:
                 output_path = self._publish_output(provider_output)
                 self._emit(
                     PipelineStage.COMPLETED,
-                    100,
                     "处理完成",
-                    output_path=output_path,
                 )
                 return PipelineResult(
                     output_path=output_path,
@@ -238,7 +234,7 @@ class VideoLocalizationPipeline:
                 )
         except Exception as exc:
             message = str(exc).strip() or "处理失败"
-            self._emit(PipelineStage.FAILED, 0, "处理失败", error=message)
+            self._emit(PipelineStage.FAILED, "处理失败", error=message)
             raise
         finally:
             self._busy = False
@@ -298,19 +294,15 @@ class VideoLocalizationPipeline:
     def _emit(
         self,
         stage: PipelineStage,
-        progress: int,
         message: str,
         *,
-        output_path: Path | None = None,
         error: str | None = None,
     ) -> None:
         if self.event_callback is not None:
             self.event_callback(
                 PipelineEvent(
                     stage=stage,
-                    progress=max(0, min(100, progress)),
                     message=message,
-                    output_path=output_path,
                     error=error,
                 )
             )

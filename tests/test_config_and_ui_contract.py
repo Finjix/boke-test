@@ -79,8 +79,24 @@ class ConfigAndUiContractTests(unittest.TestCase):
         source = (
             Path(__file__).resolve().parents[1] / "ui" / "window.py"
         ).read_text(encoding="utf-8")
-        for label in ("开始处理", "打开 output", "人物图", "场景图", "目标地区"):
+        settings_source = (
+            Path(__file__).resolve().parents[1] / "ui" / "settings.py"
+        ).read_text(encoding="utf-8")
+        for label in ("开始处理", "打开输出目录", "人物图", "场景图", "目标地区"):
             self.assertIn(label, source)
+        self.assertIn('textvariable=self.status_var', source)
+        self.assertIn('状态：', source)
+        self.assertNotIn("Progressbar", source)
+        self.assertNotIn("progress_var", source)
+        self.assertNotIn("LabelFrame", source)
+        self.assertNotIn('text="输出"', source)
+        self.assertNotIn("output_var", source)
+        self.assertIn("row=5, column=1", source)
+        self.assertIn("row=5, column=2", source)
+        self.assertIn("self.settings.grid(row=4", source)
+        self.assertIn('text="目标地区"', source)
+        self.assertIn('text="MiniMax API Key"', settings_source)
+        self.assertNotIn("LabelFrame", settings_source)
         for removed in (
             "append_segment",
             "concat_videos",
