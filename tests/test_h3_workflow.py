@@ -11,6 +11,7 @@ from unittest.mock import patch
 from api.common import ApiResponse
 from config import AppConfig
 from core.models import JobSpec, UploadedAsset
+from core.h3_prompt import build_transformation_prompt
 from core.pipeline import VideoLocalizationPipeline
 from media.ffprobe import MediaInfo
 from utils.errors import ProviderError, ValidationError
@@ -151,6 +152,49 @@ class H3WorkflowTests(unittest.TestCase):
             self.assertEqual(checkpoint["pipeline_version"], 5)
             self.assertEqual(checkpoint["provider"], "minimax_h3")
             self.assertEqual(checkpoint["h3_segments"][0]["normalized_duration_seconds"], 6)
+
+    def test_default_prompt_requires_full_scene_transformation(self) -> None:
+        prompt = build_transformation_prompt(
+            target_language="ar",
+            target_region="Saudi Arabia",
+            target_locale="ar-SA",
+        )
+        self.assertIn("not a dubbing-only", prompt)
+        self.assertIn("Mandatory full-scene transformation", prompt)
+        self.assertIn("Do not leave the original location", prompt)
+        self.assertIn("Keep the transformed people, environment", prompt)
+
+    def test_successful_output_with_container_drift_is_normalized_locally(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.mp4"
+            source.write_bytes(b"source")
+            h3 = FakeH3()
+
+            def probe(path, **kwargs):
+                name = Path(path).name
+                if name == "provider_output.mp4":
+                    duration = 6.584
+                elif name == "output.mp4":
+                    duration = 6.0
+                else:
+                    duration = 5.75
+                return _info(Path(path), duration)
+
+            with patch("core.h3_pipeline.ffprobe.probe", side_effect=probe), patch(
+                "core.h3_pipeline.normalize_video", side_effect=self._normalize
+            ), patch("core.h3_pipeline.download", side_effect=self._download):
+                result = VideoLocalizationPipeline(
+                    self._config(root), minimax_client=h3, uguu_client=FakeUguu()
+                ).run(self._spec(source), skip_preflight=True)
+
+            self.assertEqual(result.stage.value, "completed")
+            job_dir = root / "work" / result.job_id
+            attempt = json.loads(
+                (job_dir / "checkpoint.json").read_text(encoding="utf-8")
+            )["h3_segments"][0]["attempts"][0]
+            self.assertTrue(attempt["provider_output_artifact"].endswith("provider_output.mp4"))
+            self.assertTrue((job_dir / "json/nodes/h3/segment_001/attempt_001/provider_output.mp4").is_file())
 
     def test_long_video_waits_without_creating_task_and_uses_original_frames_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

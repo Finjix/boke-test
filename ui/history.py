@@ -266,6 +266,7 @@ class HistoryPanel(ttk.Frame):
                         f"      创建响应：{attempt.create_response_artifact or '-'}",
                         f"      最终响应：{attempt.final_response_artifact or '-'}",
                         f"      失败记录：{attempt.failure_artifact or '-'}",
+                        f"      Provider 原始输出：{attempt.provider_output_artifact or '-'}",
                         f"      输出：{attempt.output_artifact or '-'}",
                     ]
                 )

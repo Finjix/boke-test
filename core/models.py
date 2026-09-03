@@ -347,6 +347,7 @@ class H3Attempt(StrictModel):
     poll_response_artifacts: list[str] = Field(default_factory=list)
     final_response_artifact: str | None = None
     failure_artifact: str | None = None
+    provider_output_artifact: str | None = None
     input_artifacts: list[str] = Field(default_factory=list)
     output_artifact: str | None = None
     error: dict[str, Any] | None = None

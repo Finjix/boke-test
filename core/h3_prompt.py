@@ -14,6 +14,14 @@ H3_MAX_IMAGES = 9
 H3_MAX_FILES = 12
 
 
+def _default_transformation_instruction(target_region: str) -> str:
+    return (
+        f"Perform a full visual localization for {target_region}. This is not a dubbing-only "
+        "or character-only conversion: make the complete visible environment feel native to "
+        "the target region while preserving the source story and motion."
+    )
+
+
 def _https(value: str, label: str) -> str:
     if not isinstance(value, str) or not value.startswith("https://"):
         raise ValidationError(f"{label} must be an HTTPS URL")
@@ -49,8 +57,8 @@ def build_transformation_prompt(
         if total_segments
         else f"segment {segment_index}"
     )
-    instruction = transformation_instruction.strip() or (
-        "localize the people, setting and visible cultural elements for the target region"
+    instruction = transformation_instruction.strip() or _default_transformation_instruction(
+        target_region
     )
     continuity = (
         "A previous generated segment is supplied only as a continuity reference. Use it "
@@ -71,18 +79,27 @@ def build_transformation_prompt(
             f"Target dialogue language: {target_language}. Target region: {target_region}. "
             f"Target locale: {target_locale}.",
             f"This is {segment_label}. {instruction}.",
-            "The current source video is the core reference. Preserve the original creative "
-            "idea, story meaning, shot order, camera movement, framing, composition, action "
-            "timing, transitions, editing rhythm, pacing and overall visual effect.",
+            "The current source video is the core reference for content, motion and timing, "
+            "not an instruction to copy its unlocalized appearance. Preserve the original "
+            "creative idea, story meaning, shot order, camera movement, framing, composition, "
+            "action timing, transitions, editing rhythm, pacing and overall visual effect.",
             "Maintain strict continuity of each person's identity, face, age, hair, body "
             "proportions, clothing silhouette, accessories, gestures and position. Maintain "
             "the layout of the scene, important props, lighting logic, geography and object "
             "relationships. Do not add or remove story beats merely because the target region "
             "is different.",
-            "Change only the people, wardrobe, environment, signage, architecture, props and "
-            "other visible elements needed for a natural target-region version. Keep the same "
-            "characters and scene roles across the entire segment; do not invent replacement "
-            "characters or a different plot.",
+            "Mandatory full-scene transformation: change the people AND the visible setting in "
+            "every shot. Treat the background as a first-class output. Where visible, redesign "
+            "the architecture and streetscape, storefronts and signage, vehicles, furniture, "
+            "food or packaging, props, wardrobe and other culturally specific details so the "
+            f"scene reads as an authentic {target_region} version. Do not leave the original "
+            "location, building facade, business signs, vehicles or background unchanged, and "
+            "do not merely recolor the source or dub its audio. Keep the same characters, scene "
+            "roles, relative placement and action beats across the entire segment; do not invent "
+            "a different plot or unrelated replacement characters.",
+            "Keep the transformed people, environment, props and lighting logic consistent from "
+            "shot to shot. Preserve continuity of the transformed setting while retaining the "
+            "source camera path, composition and edit rhythm.",
             "If reference images are supplied, use them as style, appearance or cultural "
             "guidance only. Do not treat them as a replacement source video and do not copy "
             "unrelated subjects, poses or compositions.",

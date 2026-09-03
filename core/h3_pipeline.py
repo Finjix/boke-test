@@ -58,6 +58,7 @@ H3_MIN_DURATION_SECONDS = 4
 H3_MAX_DURATION_SECONDS = 15
 H3_MAX_REFERENCE_VIDEO_SECONDS = 15.0
 H3_ORIGINAL_FRAME_COUNT = 4
+H3_OUTPUT_DURATION_TOLERANCE = 0.4
 H3_PROVIDER = "minimax_h3"
 H3_NODE = "h3"
 H3_ACTIVE_STATUSES = {"queued", "running", "processing"}
@@ -735,9 +736,16 @@ class H3VideoLocalizationPipeline:
         )
         response_path = getattr(response, "raw_path", None)
         if response_path:
-            attempt.final_response_artifact = self._path_reference(context, Path(response_path))
-            attempt.poll_response_artifacts.append(attempt.final_response_artifact)
+            poll_artifact = self._path_reference(context, Path(response_path))
+            if poll_artifact not in attempt.poll_response_artifacts:
+                attempt.poll_response_artifacts.append(poll_artifact)
         data = response.data if hasattr(response, "data") else response
+        final_response_path = self._attempt_dir(context, segment, attempt) / "final_response.json"
+        write_json(final_response_path, data)
+        attempt.final_response_artifact = self._path_reference(context, final_response_path)
+        if node is not None and attempt.final_response_artifact not in node.output_artifacts:
+            node.output_artifacts.append(attempt.final_response_artifact)
+        self._save_checkpoint(context)
         video_url = task_video_url(data)
         if not video_url:
             raise ProviderError(
@@ -749,14 +757,14 @@ class H3VideoLocalizationPipeline:
                 retryable=False,
             )
         attempt.video_url = str(video_url)
-        output_path = self._attempt_dir(context, segment, attempt) / "output.mp4"
+        provider_output_path = self._attempt_dir(context, segment, attempt) / "provider_output.mp4"
         download(
             str(video_url),
-            output_path,
+            provider_output_path,
             timeout=self.config.http_timeout,
             attempts=self.config.max_retries,
         )
-        if not output_path.is_file() or output_path.stat().st_size <= 0:
+        if not provider_output_path.is_file() or provider_output_path.stat().st_size <= 0:
             raise ProviderError(
                 "MiniMax H3 produced no output video file",
                 provider=H3_PROVIDER,
@@ -764,15 +772,44 @@ class H3VideoLocalizationPipeline:
                 payload=data,
                 retryable=False,
             )
+        provider_info = ffprobe.probe(
+            provider_output_path,
+            ffprobe_bin=self.config.ffprobe_bin,
+            timeout=self.config.http_timeout,
+        )
+        self._validate_output_info(provider_info, expected_duration=None)
+        provider_info_path = self._attempt_dir(context, segment, attempt) / "provider_output_info.json"
+        write_json(provider_info_path, provider_info.raw)
+        attempt.provider_output_artifact = self._path_reference(context, provider_output_path)
+        if node is not None:
+            for artifact in (
+                attempt.provider_output_artifact,
+                self._path_reference(context, provider_info_path),
+            ):
+                if artifact not in node.output_artifacts:
+                    node.output_artifacts.append(artifact)
+        self._save_checkpoint(context)
+
+        output_path = self._attempt_dir(context, segment, attempt) / "output.mp4"
+        expected_duration = float(segment.normalized_duration_seconds)
+        if abs(float(provider_info.duration) - expected_duration) > H3_OUTPUT_DURATION_TOLERANCE:
+            normalize_video(
+                provider_output_path,
+                output_path,
+                duration_seconds=segment.normalized_duration_seconds,
+                source_duration_seconds=provider_info.duration,
+                ffprobe_bin=self.config.ffprobe_bin,
+                ffmpeg_bin=self.ffmpeg_bin,
+                timeout=max(self.config.http_timeout, 600.0),
+            )
+        else:
+            shutil.copy2(provider_output_path, output_path)
         info = ffprobe.probe(
             output_path,
             ffprobe_bin=self.config.ffprobe_bin,
             timeout=self.config.http_timeout,
         )
-        self._validate_output_info(info, expected_duration=float(segment.normalized_duration_seconds))
-        final_response_path = self._attempt_dir(context, segment, attempt) / "final_response.json"
-        write_json(final_response_path, data)
-        attempt.final_response_artifact = self._path_reference(context, final_response_path)
+        self._validate_output_info(info, expected_duration=expected_duration)
         info_path = self._attempt_dir(context, segment, attempt) / "output_info.json"
         write_json(info_path, info.raw)
         attempt.output_artifact = self._path_reference(context, output_path)
@@ -841,6 +878,17 @@ class H3VideoLocalizationPipeline:
         node: NodeExecution | None = None,
     ) -> None:
         record = self._error_record(PipelineStage.GENERATING_SEGMENT, exc)
+        if isinstance(exc, ProviderError):
+            if exc.request_id and not attempt.request_id:
+                attempt.request_id = exc.request_id
+            if exc.raw_response_path and attempt.task_id:
+                raw_artifact = self._path_reference(context, Path(exc.raw_response_path))
+                if raw_artifact not in attempt.poll_response_artifacts:
+                    attempt.poll_response_artifacts.append(raw_artifact)
+            if node is None:
+                node = self._node_for_attempt(context, segment.index, attempt.attempt)
+            if node is not None and exc.request_id and exc.request_id not in node.request_ids:
+                node.request_ids.append(exc.request_id)
         keep_running = bool(attempt.task_id) and self._is_recoverable_active_error(exc)
         if keep_running:
             attempt.error = record.as_dict()
@@ -1332,14 +1380,17 @@ class H3VideoLocalizationPipeline:
             return task.get(name)
         return getattr(task, name, None)
 
-    def _validate_output_info(self, info: Any, *, expected_duration: float) -> None:
+    def _validate_output_info(self, info: Any, *, expected_duration: float | None) -> None:
         if not info.has_video:
             raise ValidationError("H3 output has no video stream")
         if not info.has_audio:
             raise ValidationError("H3 output has no generated audio stream")
         if info.duration <= 0:
             raise ValidationError("H3 output has no positive duration")
-        if abs(float(info.duration) - expected_duration) > 0.4:
+        if (
+            expected_duration is not None
+            and abs(float(info.duration) - expected_duration) > H3_OUTPUT_DURATION_TOLERANCE
+        ):
             raise ValidationError(
                 f"H3 output duration {info.duration:.3f}s differs from requested {expected_duration:.0f}s"
             )

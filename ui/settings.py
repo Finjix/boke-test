@@ -32,7 +32,10 @@ class SettingsPanel(ttk.LabelFrame):
         ttk.Entry(self, textvariable=variable, width=48, show="*").grid(
             row=0, column=1, sticky="ew", pady=3
         )
-        ttk.Label(self, text="模型：MiniMax-H3    端点：https://api.minimax.cn").grid(
+        ttk.Label(
+            self,
+            text="模型：MiniMax-H3    默认分辨率：768P    端点：https://api.minimax.cn",
+        ).grid(
             row=1, column=0, columnspan=2, sticky="w", pady=(5, 0)
         )
         ttk.Label(self, text="密钥只保存在项目根目录本地设置文件，不写入任务日志。").grid(

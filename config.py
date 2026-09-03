@@ -24,6 +24,7 @@ from video_config import SEEDANCE_MAX_DURATION, SEEDANCE_TASK_TIMEOUT
 FIXED_DOUBAO_MODEL = "doubao-seed-2-0-lite-260428"
 FIXED_MINIMAX_H3_MODEL = "MiniMax-H3"
 MINIMAX_CN_BASE_URL = "https://api.minimax.cn"
+MINIMAX_H3_DEFAULT_RESOLUTION = "768P"
 MINIMAX_H3_RESOLUTIONS = frozenset({"768P", "2K"})
 
 
@@ -89,7 +90,7 @@ class AppConfig:
     minimax_base_url: str = MINIMAX_CN_BASE_URL
     minimax_model: str = FIXED_MINIMAX_H3_MODEL
     minimax_task_timeout: int = 7200
-    minimax_resolution: str = "2K"
+    minimax_resolution: str = MINIMAX_H3_DEFAULT_RESOLUTION
     seedance_model_id: str = ""
     seedance_max_duration: int = SEEDANCE_MAX_DURATION
     seedance_task_timeout: int = SEEDANCE_TASK_TIMEOUT
@@ -161,7 +162,11 @@ class AppConfig:
             ).rstrip("/"),
             minimax_model=FIXED_MINIMAX_H3_MODEL,
             minimax_task_timeout=_int(source, "MINIMAX_TASK_TIMEOUT", 7200),
-            minimax_resolution=_text(source, "MINIMAX_RESOLUTION", "2K").upper(),
+            minimax_resolution=_text(
+                source,
+                "MINIMAX_RESOLUTION",
+                MINIMAX_H3_DEFAULT_RESOLUTION,
+            ).upper(),
             seedance_model_id=_text(source, "SEEDANCE_MODEL_ID"),
             seedance_max_duration=_int(source, "SEEDANCE_MAX_DURATION", SEEDANCE_MAX_DURATION),
             seedance_task_timeout=_int(source, "SEEDANCE_TASK_TIMEOUT", SEEDANCE_TASK_TIMEOUT),
