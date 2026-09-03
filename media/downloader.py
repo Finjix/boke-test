@@ -7,7 +7,6 @@ from pathlib import Path
 import requests
 
 from utils.errors import ProviderError
-from utils.retry import retry_call
 
 
 def download(
@@ -16,7 +15,6 @@ def download(
     *,
     timeout: float = 180.0,
     session: requests.Session | None = None,
-    attempts: int = 3,
 ) -> Path:
     if not url.startswith(("http://", "https://")):
         raise ProviderError(
@@ -46,4 +44,4 @@ def download(
             ) from exc
         return output_path
 
-    return retry_call(operation, attempts=attempts)
+    return operation()

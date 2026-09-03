@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import math
-import os
 import subprocess
 import uuid
 from pathlib import Path
 
+from config import MINIMAX_GENERATION_MIN_DURATION_SECONDS
 from media import ffprobe
 from utils.errors import MediaCommandError, ValidationError
 
@@ -82,7 +82,7 @@ def normalize_video(
     destination = Path(destination)
     if not source.is_file():
         raise ValidationError(f"source video does not exist: {source}")
-    if not isinstance(duration_seconds, int) or not 4 <= duration_seconds <= 15:
+    if not isinstance(duration_seconds, int) or not MINIMAX_GENERATION_MIN_DURATION_SECONDS <= duration_seconds <= 15:
         raise ValidationError("normalized H3 duration must be an integer from 4 to 15")
     if source_duration_seconds is None:
         source_duration_seconds = ffprobe.probe(
@@ -129,112 +129,6 @@ def normalize_video(
         "2",
         "-movflags",
         "+faststart",
-        str(temporary),
-    ]
-    try:
-        _run(command, timeout=timeout)
-        return _finish_atomic(temporary, destination)
-    finally:
-        try:
-            temporary.unlink(missing_ok=True)
-        except OSError:
-            pass
-
-
-def extract_uniform_frames(
-    source: Path,
-    destination_dir: Path,
-    *,
-    count: int = 4,
-    ffprobe_bin: str = "ffprobe",
-    ffmpeg_bin: str | None = None,
-    timeout: float = 300.0,
-) -> list[Path]:
-    """Extract deterministic frames spread across the original master video."""
-
-    if not 1 <= count <= 9:
-        raise ValidationError("frame count must be between 1 and 9")
-    source = Path(source)
-    info = ffprobe.probe(source, ffprobe_bin=ffprobe_bin, timeout=min(timeout, 120.0))
-    destination_dir = Path(destination_dir)
-    destination_dir.mkdir(parents=True, exist_ok=True)
-    ffmpeg = ffmpeg_bin or resolve_ffmpeg_bin(ffprobe_bin)
-    # Keep the final timestamp inside the media rather than asking ffmpeg to
-    # seek exactly to EOF, which is unreliable for some codecs.
-    timestamps = [
-        0.0
-        if count == 1
-        else min(info.duration - 0.05, info.duration * index / count)
-        for index in range(count)
-    ]
-    results: list[Path] = []
-    for index, timestamp in enumerate(timestamps, start=1):
-        destination = destination_dir / f"frame_{index:02d}.png"
-        temporary = _temporary_path(destination)
-        command = [
-            ffmpeg,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-ss",
-            f"{max(0.0, timestamp):.3f}",
-            "-i",
-            str(source),
-            "-frames:v",
-            "1",
-            "-an",
-            str(temporary),
-        ]
-        try:
-            _run(command, timeout=timeout)
-            _finish_atomic(temporary, destination)
-        finally:
-            try:
-                temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
-        results.append(destination)
-    return results
-
-
-def extract_frame_at(
-    source: Path,
-    destination: Path,
-    *,
-    timestamp_seconds: float,
-    ffprobe_bin: str = "ffprobe",
-    ffmpeg_bin: str | None = None,
-    timeout: float = 300.0,
-) -> Path:
-    """Extract one deterministic PNG frame at a source-video timestamp."""
-
-    source = Path(source)
-    destination = Path(destination)
-    if timestamp_seconds < 0 or not math.isfinite(timestamp_seconds):
-        raise ValidationError("frame timestamp must be finite and non-negative")
-    info = ffprobe.probe(source, ffprobe_bin=ffprobe_bin, timeout=min(timeout, 120.0))
-    if not info.has_video:
-        raise ValidationError("source video must contain a video stream")
-    timestamp = min(max(0.0, timestamp_seconds), max(0.0, info.duration - 0.05))
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    ffmpeg = ffmpeg_bin or resolve_ffmpeg_bin(ffprobe_bin)
-    temporary = _temporary_path(destination)
-    command = [
-        ffmpeg,
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-y",
-        "-ss",
-        f"{timestamp:.3f}",
-        "-i",
-        str(source),
-        "-frames:v",
-        "1",
-        "-an",
-        "-f",
-        "image2",
         str(temporary),
     ]
     try:

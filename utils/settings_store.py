@@ -1,9 +1,4 @@
-"""Persistence for settings entered in the desktop UI.
-
-The user explicitly opted to keep API credentials between application runs.
-Values are stored as a small local JSON file in the project root. The file is
-ignored by Git and is never sent to a provider or written to the job log.
-"""
+"""Small local persistence for the MiniMax API key entered in Tkinter."""
 
 from __future__ import annotations
 
@@ -13,31 +8,17 @@ from typing import Mapping
 
 
 SETTINGS_FILENAME = ".video-localizer-settings.json"
-EDITABLE_SETTING_NAMES = (
-    "ark_api_key",
-    "seedance_model_id",
-)
-H3_SETTING_NAMES = (
-    "minimax_api_key",
-)
-PREFERENCE_NAMES = (
-    # Historical key retained so existing installations keep their choice;
-    # the active v7 UI interprets it as automatic continuation through
-    # Doubao, Seedream and H3.
-    "auto_continue_to_seedance",
-)
+EDITABLE_SETTING_NAMES = ("minimax_api_key",)
 
 
 class SettingsStore:
-    """Read and atomically write the values exposed by the GUI settings panel."""
+    """Read and atomically write the only setting exposed by the GUI."""
 
     def __init__(self, path: Path | None = None, *, project_root: Path | None = None):
         root = Path(project_root or Path(__file__).resolve().parents[1])
         self.path = Path(path) if path is not None else root / SETTINGS_FILENAME
 
     def load(self) -> dict[str, str]:
-        """Load valid editable settings, ignoring a missing or damaged file."""
-
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError):
@@ -46,70 +27,18 @@ class SettingsStore:
         values = payload.get("values", payload) if isinstance(payload, dict) else {}
         if not isinstance(values, dict):
             return {}
-        result = {
+        return {
             name: value
             for name in EDITABLE_SETTING_NAMES
             if isinstance(value := values.get(name), str)
         }
-        for name in H3_SETTING_NAMES:
-            if isinstance(value := values.get(name), str):
-                result[name] = value
-        return result
 
-    def load_preferences(self) -> dict[str, bool]:
-        """Load non-secret UI preferences with safe defaults."""
-
-        try:
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            return {}
-        preferences = payload.get("preferences", {}) if isinstance(payload, dict) else {}
-        if not isinstance(preferences, dict):
-            return {}
-        result: dict[str, bool] = {}
-        for name in PREFERENCE_NAMES:
-            value = preferences.get(name)
-            if isinstance(value, bool):
-                result[name] = value
-            elif isinstance(value, str) and value.strip().casefold() in {"1", "true", "yes", "on"}:
-                result[name] = True
-            elif isinstance(value, str) and value.strip().casefold() in {"0", "false", "no", "off"}:
-                result[name] = False
-        return result
-
-    def save(
-        self,
-        values: Mapping[str, str],
-        *,
-        preferences: Mapping[str, bool] | None = None,
-    ) -> None:
-        """Persist editable settings without leaving a partially written file."""
-
+    def save(self, values: Mapping[str, str]) -> None:
         normalized = {
             name: str(values.get(name, "")).strip()
             for name in EDITABLE_SETTING_NAMES
         }
-        old_values = self.load()
-        for name in H3_SETTING_NAMES:
-            if name in values or name in old_values:
-                normalized[name] = str(
-                    values.get(name, old_values.get(name, ""))
-                ).strip()
-        old_preferences = self.load_preferences()
-        normalized_preferences = {
-            name: bool(
-                (preferences or {}).get(
-                    name,
-                    old_preferences.get(name, False),
-                )
-            )
-            for name in PREFERENCE_NAMES
-        }
-        payload = {
-            "version": 3,
-            "values": normalized,
-            "preferences": normalized_preferences,
-        }
+        payload = {"version": 4, "values": normalized}
         temporary_path = self.path.with_name(f".{self.path.name}.tmp")
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)

@@ -13,13 +13,10 @@ def main() -> None:
     project_root = Path(__file__).resolve().parent
     config = AppConfig.from_env(base_dir=project_root)
     stored = SettingsStore(project_root=project_root).load()
-    overrides = {
-        name: stored[name]
-        for name in ("ark_api_key", "minimax_api_key")
-        if not getattr(config, name) and stored.get(name)
-    }
-    if overrides:
-        config = config.with_overrides(**overrides)
+    if not config.minimax_api_key and stored.get("minimax_api_key"):
+        config = config.with_overrides(
+            minimax_api_key=stored["minimax_api_key"]
+        )
     run_gui(config)
 
 

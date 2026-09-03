@@ -83,10 +83,8 @@ H3_TARGET_LOCALES: tuple[TargetLocale, ...] = tuple(
 )
 
 
-# Doubao may return either the ISO language code requested by the job (for
-# example ``ar``) or the human-readable language name used by the GUI (for
-# example ``Arabic``). Keep the comparison in one place so every provider
-# path accepts both forms without weakening unrelated target validation.
+# Keep language-name and ISO-code comparison in one place so locale validation
+# remains consistent across the GUI and API prompt builders.
 LANGUAGE_CODE_ALIASES: dict[str, str] = {}
 for _locale in TARGET_LOCALES:
     LANGUAGE_CODE_ALIASES[_locale.language.casefold()] = _locale.language_code.casefold()
@@ -109,5 +107,13 @@ def language_values_match(left: str, right: str) -> bool:
 def locale_from_label(label: str) -> TargetLocale | None:
     for locale in TARGET_LOCALES:
         if locale.label == label:
+            return locale
+    return None
+
+
+def locale_from_code(code: str) -> TargetLocale | None:
+    normalized = code.strip().casefold()
+    for locale in TARGET_LOCALES:
+        if locale.locale_code.casefold() == normalized:
             return locale
     return None

@@ -50,15 +50,10 @@ def persist_raw_json(
     payload: Any,
     *,
     request_id: str | None = None,
-    attempt: int | None = None,
 ) -> Path:
     raw_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    suffix = "_".join(
-        part
-        for part in (str(attempt) if attempt is not None else "", request_id or "")
-        if part
-    )
+    suffix = request_id or ""
     name = "_".join(part for part in (_safe_name(stage), stamp, suffix) if part)
     return write_json(raw_dir / f"{name}.json", payload)
 

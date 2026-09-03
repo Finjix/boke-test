@@ -1,77 +1,73 @@
-# Doubao Seed + MiniMax H3 视频本地化工具
+# MiniMax H3-Context-IR 视频本地化工具
 
-这是一个 Python/Tkinter 桌面工具。Doubao Seed 2.0 Lite 先完整分析源视频，输出包含人物、场景、分镜、可见文字、对白和语音要求的本地化方案；随后使用源视频关键帧调用 Doubao Seedream 5.0 Pro，为每个分镜生成目标场景参考图，并将此前已生成的全部参考图作为连续性参考（超过输入上限时保留最新的前序参考图）；最后由 MiniMax H3 根据方案和分镜参考图生成目标地区版本。源视频始终是内容、镜头和节奏的核心，前端不再接收用户参考图。
+这是一个仅使用 Python/Tkinter 和 MiniMax 的桌面视频本地化工具。处理链路为：
+
+```text
+源视频片段 + 目标地区
+        ↓
+MiniMax /v2/h3_context_ir
+        ↓ 读取 task.content.prompt
+MiniMax /v2/video_generation
+        ↓ 读取 task.content.url
+下载并校验生成视频
+```
+
+Context-IR 只负责根据源视频和目标地区生成增强提示词，不直接生成视频；普通 H3 使用该提示词和同一源视频片段生成结果。详见 [H3-Context-IR 文档](https://platform.minimax.cn/docs/api-reference/video-generation-v2-h3-context-ir) 和 [视频生成 V2 文档](https://platform.minimax.cn/docs/api-reference/video-generation-v2-create)。
 
 ## 安装
 
-要求：Windows 10/11 x64。首次启动需要安装依赖并访问网络：
+要求：Windows 10/11 x64。首次启动安装项目运行时、ffprobe 和 Python 依赖：
 
 ```powershell
 .\tools\install_dependencies.ps1
 ```
 
-复制 `.env.example` 为 `.env`，填写 `ARK_API_KEY` 和 `MINIMAX_API_KEY`。Doubao 模型固定为 `doubao-seed-2-0-lite-260428`，H3 模型固定为 `MiniMax-H3`。API Key 也可以在桌面设置中填写，保存到项目根目录的本地设置文件；不会写入任务日志。
+复制 `.env.example` 为 `.env`，填写 `MINIMAX_API_KEY`。也可以在 Tkinter 设置面板中填写，Key 会保存到项目根目录的本地设置文件，不会写入任务日志。
 
-官方规格与异步接口说明见 [MiniMax 视频生成文档](https://platform.minimaxi.com/docs/guides/video-generation)。项目默认使用 768P；如需 2K，才在环境变量中显式设置。H3 的视频生成结果仍需人工验收，提示词和参考素材不能保证像素级人物/场景一致，也不能保证任何内容审核一定通过。
-
-## 处理规则
-
-- 所有任务先将完整源视频交给 Doubao 分析一次；分析结果会保存到本地。
-- Doubao 分析默认使用本地视频 Base64 Data URL，不再依赖 Uguu 上传；可将 `DOUBAO_VIDEO_INPUT_MODE` 设为 `url` 回到旧的公网 URL 方式。Base64 受 Ark 的视频和请求体大小限制，H3/Seedream 阶段仍使用 Uguu 公网素材地址。
-- 默认在 Doubao 完成后等待人工确认；确认后才创建 H3 任务。设置中可开启自动继续。
-- 源视频不超过 15 秒：确认后创建一个 H3 转化任务。
-- 源视频超过 15 秒：Doubao 分析完成后等待上传片段，不会自动创建 H3 任务。片段必须按顺序上传，每片 4–15 秒。
-- Doubao 方案要求覆盖人物、服装、场景、建筑、道具、车辆、可见文字/招牌/包装、目标语音和对白时间轴，同时保持人物关系、创意结构、镜头构图、动作节奏、转场、剪辑节奏和整体效果一致。
-- Doubao 为每个检测到的镜头选择一个关键帧和连续性分组；每个镜头调用一次 Seedream 5.0 Pro，以源关键帧为当前镜头输入，并从第二个镜头开始附带此前已生成的全部参考图作为连续性参考；如果达到模型上限，保留最新的前序参考图，生成最低 `2K` 目标场景参考图（用于分镜，不是最终交付分辨率）。
-- 如果 Seedream 返回 `OutputImageSensitiveContentDetected`，程序立即停止该错误的自动重试，把当前镜头提示词交回 Doubao 用中性、非图形化措辞重写；原提示词、修正请求、修正响应和失败证据都会留在该 Seedream attempt 下。之后显式 `retry-seedream` 才会用修正后的提示词生成一次，成功后自动模式继续进入 H3，手动模式仍等待确认。
-- H3 每次最多接收 9 张 Seedream 分镜参考图；长视频片段按源视频时间轴映射到对应分镜。若一片覆盖超过 9 个镜头，程序会在创建 H3 task 前要求重新切分。
-- 长视频第二片及后续片段会在当前片段分镜参考图之外，附带前一片已经使用过的 Seedream 分镜参考图（受 H3 的 9 张图片上限约束，优先保留当前片段图和最新的前片连续性图），并在提示词中标记为跨片段连续性锚点。
-- Doubao 分析和 Seedream 参考图生成等 H3 前置阶段失败时，默认每 10 秒自动重试 3 次（含首次调用最多 4 次）；每次尝试仍独立保存节点和失败证据，H3 创建后的失败继续使用 H3 专用重试流程。
-- 后续 H3 片段不再使用上一片生成视频或原始均匀帧作为背景参考，仍以当前手动上传的源片段为运动、镜头和剪辑依据，并使用 Doubao 分析生成的 Seedream 分镜图保持场景连续。
-- H3 只开放官方稳定对白语言集合：Arabic、Chinese、English、French、German、Italian、Japanese、Korean、Portuguese、Russian、Spanish。地区和 locale 会进入提示词，但 H3 没有具体国家方言保证。
-- 全部片段完成后执行本地拼接。每个片段的原始输入、上传记录、请求响应、task ID、失败原因、Provider 原始输出和本地标准化输出都单独保存。H3 返回的封装时长可能带有编码误差，程序会在本地将成功下载的结果裁剪/补帧到请求的整数秒，不会因此重复付费创建任务。
-
-## 脚本操作
+启动入口为：
 
 ```powershell
-# 新任务；默认在 Doubao 分析完成后等待人工确认
-.\runtime\python3.13.15\python.exe h3_workflow.py start --video .\case\测试.mp4 --language ar --region "Saudi Arabia" --locale ar-SA
-
-# 如需自动跳过 Doubao 方案和 Seedream 参考图确认并进入 H3
-.\runtime\python3.13.15\python.exe h3_workflow.py start --auto-continue --video .\case\测试.mp4 --language ar --region "Saudi Arabia" --locale ar-SA
-
-# 查看 Doubao 方案后确认并生成 Seedream 分镜参考图
-.\runtime\python3.13.15\python.exe h3_workflow.py approve-doubao --job-id <job_id>
-.\runtime\python3.13.15\python.exe h3_workflow.py retry-doubao --job-id <job_id>
-
-# 查看 Seedream 分镜图后确认进入 H3，或只重试失败的分镜图
-.\runtime\python3.13.15\python.exe h3_workflow.py approve-seedream --job-id <job_id>
-.\runtime\python3.13.15\python.exe h3_workflow.py retry-seedream --job-id <job_id> --shot-id shot_001
-
-# 长视频按顺序追加片段
-.\runtime\python3.13.15\python.exe h3_workflow.py append-segment --job-id <job_id> --video .\片段01.mp4
-.\runtime\python3.13.15\python.exe h3_workflow.py append-segment --job-id <job_id> --video .\片段02.mp4
-
-# 轮询中断后继续原 task；失败后只重试当前片段
-.\runtime\python3.13.15\python.exe h3_workflow.py continue --job-id <job_id>
-.\runtime\python3.13.15\python.exe h3_workflow.py retry --job-id <job_id>
-.\runtime\python3.13.15\python.exe h3_workflow.py finish --job-id <job_id>
-
-# 只读取本地历史，不调用网络
-.\runtime\python3.13.15\python.exe h3_workflow.py history
+.\start_app.cmd
 ```
 
-## 本地持久化
+## 使用规则
 
-每个任务的事实来源是 `work/<job_id>/checkpoint.json`，快速索引是 `work/history.json`。Doubao 节点保存在 `json/nodes/doubao/attempt_<n>/`，包括原始响应、校验后的 package、H3 提示词和失败记录；Seedream 每个镜头保存在 `json/nodes/seedream/shot_<shot_id>/attempt_<n>/`，包括请求、原始响应、源关键帧、Provider 输出、规范化参考图和失败记录；H3 每次尝试保存在 `json/nodes/h3/segment_<n>/attempt_<n>/`，包括 `content.json`、原始响应、最终响应、失败记录和输出文件。应用重启时只读取历史，不自动重新调用 Doubao、Seedream、轮询或创建 H3 任务；明确确认、继续或重试后才访问云端。v4/v5/v6 checkpoint 仍可在历史中查看，但不能直接恢复。
+- 目标地区从下拉框选择，例如 `Gulf (Arabic)`；语言和地区由 locale 预设派生，不接受自由文本。
+- 源视频不超过 15 秒时，点击“开始处理”后立即执行一次 Context-IR 和一次 H3。
+- 源视频超过 15 秒时，开始后只检查总时长并等待上传片段，不会把完整长视频发送到云端。
+- 长视频由用户预先切成 3–15 秒片段；分片处理和本地拼接能力保留在流水线接口中，当前窗口不展示“上传下一片”和“完成拼接”按钮。
+- MiniMax H3 的生成参数仍要求 4–15 秒；3 秒片段会在本地进入 H3 前补帧/补音到 4 秒，避免请求被接口拒绝。
+- 所有已上传片段成功后，点击“完成拼接”使用本地 ffmpeg 按顺序合并。
+- 单个上传片段按 MiniMax 官方视频输入限制校验，最大 50 MB；公网输入地址由 Uguu 临时提供。
+- 任务只存在于当前 Tkinter 进程。失败后当前任务终止，需要重新开始；没有人工确认、重试、恢复、历史任务或命令行入口。
+- 每个任务目录会保存当前会话、请求和原始响应，供排错使用；程序重启后不会读取这些文件来恢复任务。
 
-## 运行与测试
+## 配置
+
+核心配置如下，完整示例见 `.env.example`：
+
+```dotenv
+MINIMAX_API_KEY=
+MINIMAX_BASE_URL=https://api.minimax.cn
+MINIMAX_RESOLUTION=768P
+MINIMAX_TASK_TIMEOUT=7200
+UGUU_UPLOAD_URL=https://uguu.se/upload
+UGUU_MAX_FILE_MIB=50
+UGUU_EXPIRE_HOURS=3
+HTTP_TIMEOUT=180
+POLL_INTERVAL=10
+WORK_DIR=./work
+FFPROBE_BIN=tools/ffmpeg/bin/ffprobe.exe
+```
+
+默认输出分辨率为 768P，可通过 `MINIMAX_RESOLUTION=2K` 调整；界面不提供分辨率选择。
+
+## 测试
 
 ```powershell
-.\runtime\python3.13.15\python.exe app.py
-.\runtime\python3.13.15\python.exe -m unittest discover -s tests -v
-.\runtime\python3.13.15\python.exe -m compileall -q .
+.venv\Scripts\python.exe -m unittest discover -s tests -v
+.venv\Scripts\python.exe -m compileall -q .
 git diff --check
 ```
 
-单元测试使用 Provider 和 HTTP 替身，不会创建真实 H3 任务。真实验收应重点检查目标语言、人物/场景连续性、镜头节奏、音频流和审核结果。
+离线测试使用 HTTP、媒体处理和上传替身，不创建真实云端任务。真实验收仍需使用有效 MiniMax Key、可访问的 Uguu 地址和实际视频片段。

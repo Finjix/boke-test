@@ -13,7 +13,6 @@ from core.models import UploadedAsset
 from utils.artifacts import persist_raw_json, persist_raw_text
 from utils.errors import ProviderError
 from utils.logger import JobLogger
-from utils.retry import retry_call
 
 
 @dataclass
@@ -142,20 +141,7 @@ class UguuClient:
                 ).isoformat(),
             )
 
-        return retry_call(
-            operation,
-            attempts=self.config.max_retries,
-            on_retry=(
-                lambda attempt, delay, error: self.logger.warning(
-                    "retrying Uguu upload",
-                    attempt=attempt,
-                    delay=delay,
-                    error=str(error),
-                )
-                if self.logger
-                else None
-            ),
-        )
+        return operation()
 
     def upload_many(
         self,
@@ -206,17 +192,4 @@ class UguuClient:
                     retryable=status == 429 or status >= 500,
                 )
 
-        retry_call(
-            operation,
-            attempts=self.config.max_retries,
-            on_retry=(
-                lambda attempt, delay, error: self.logger.warning(
-                    "retrying Uguu endpoint check",
-                    attempt=attempt,
-                    delay=delay,
-                    error=str(error),
-                )
-                if self.logger
-                else None
-            ),
-        )
+        operation()

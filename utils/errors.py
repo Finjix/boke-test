@@ -18,18 +18,10 @@ class ValidationError(VideoLocalizerError):
     pass
 
 
-class JsonContractError(ValidationError):
-    pass
-
-
 class PreflightError(VideoLocalizerError):
     def __init__(self, message: str, checks: list[dict[str, Any]] | None = None):
         super().__init__(message)
         self.checks = checks or []
-
-
-class UnsupportedDurationError(VideoLocalizerError):
-    pass
 
 
 class PipelineCancelled(VideoLocalizerError):
